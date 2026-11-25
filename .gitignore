@@ -1,3 +1,7 @@
 # bv (beads viewer) local config and caches
 .bv/
 .tmp/
+/target
+*.db
+*.db-shm
+*.db-wal
