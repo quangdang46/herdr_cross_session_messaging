@@ -9,6 +9,9 @@ pub enum CoreError {
     /// Protocol failure.
     #[error("protocol: {0}")]
     Protocol(#[from] herdr_protocol::HerdrError),
+    /// Required `HERDR_*` env var is absent or empty.
+    #[error("missing env var: {0}")]
+    MissingEnv(String),
     /// Could not determine a project scope for the pane/agent.
     #[error("scope unresolved: {0}")]
     ScopeUnresolved(String),

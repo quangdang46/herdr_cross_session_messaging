@@ -337,10 +337,13 @@ dependencies = [
 name = "herdr-pool-core"
 version = "0.1.0"
 dependencies = [
+ "herdr-plugin",
  "herdr-pool-store",
  "herdr-protocol",
  "serde",
+ "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "tracing",
 ]
