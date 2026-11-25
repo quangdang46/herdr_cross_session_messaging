@@ -413,7 +413,8 @@ fn blocked_status_schedules_message_and_idle_delivers() {
     }));
 
     // The next (and only, thanks to the +15s blocked backoff) prompt
-    // attempt fails with agent_blocked → failed + scheduled retry.
+    // attempt fails with agent_blocked → deferred + scheduled retry, with
+    // no delivery attempt consumed.
     server
         .on("agent.prompt")
         .error("agent_blocked", "agent is busy");
@@ -423,13 +424,13 @@ fn blocked_status_schedules_message_and_idle_delivers() {
         .unwrap();
 
     assert!(
-        wait_until(WAIT, "blocked attempt recorded", || {
+        wait_until(WAIT, "blocked defer recorded", || {
             pool.messages()
                 .message(&msg.id)
                 .map(|m| {
                     m.map(|m| {
-                        m.attempt_count >= 1
-                            && m.status == MessageStatus::Failed
+                        m.status == MessageStatus::Pending
+                            && m.attempt_count == 0
                             && m.next_retry_at.is_some()
                             && m.delivered_at.is_none()
                     })
@@ -437,7 +438,7 @@ fn blocked_status_schedules_message_and_idle_delivers() {
                 })
                 .unwrap_or(false)
         }),
-        "message should be failed+scheduled after agent_blocked"
+        "message should stay pending+scheduled after agent_blocked"
     );
 
     // Agent goes idle → delivery nudge; make the retry due now (the

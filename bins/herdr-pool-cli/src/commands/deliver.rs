@@ -49,14 +49,24 @@ pub fn deliver(
 
     match ctx.client.agent_prompt(&target, &text, None) {
         Ok(_) => {
-            messages.mark_delivered(&msg.id)?;
+            // The recipient may have consumed pending mail via `inbox`
+            // while the prompt was in flight; `acknowledged` is already
+            // terminal, so only a genuine transition failure is an error.
+            if let Err(err) = messages.mark_delivered(&msg.id) {
+                let current = messages.message(&msg.id)?;
+                if current.map(|m| m.status) != Some(herdr_pool_store::MessageStatus::Acknowledged)
+                {
+                    return Err(err.into());
+                }
+            }
             tracing::info!(message = %msg.id, to = %msg.to_agent, "message delivered");
         }
         Err(err) if err.is_agent_blocked() => {
-            // Agent alive but busy: short backoff, same as the worker.
+            // Agent alive but busy: defer without consuming an attempt —
+            // same policy as the delivery worker.
             let next = now_millis() + BLOCKED_BACKOFF.as_millis() as i64;
-            messages.record_failure(&msg.id, Some(next))?;
-            tracing::debug!(message = %msg.id, "agent blocked; scheduled retry");
+            messages.defer(&msg.id, Some(next))?;
+            tracing::debug!(message = %msg.id, "agent blocked; deferred");
         }
         Err(err) => {
             let delay = retry_delay(msg.attempt_count);

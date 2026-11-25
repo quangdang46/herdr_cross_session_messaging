@@ -176,9 +176,9 @@ fn invalid_transitions_are_rejected() {
     let msgs = store.messages();
     let msg = msgs.send("ag_a", "ag_b", "hi").expect("send");
 
-    // delivered -> pending via retry must fail while still pending too? retry
-    // requires failed|dead.
-    assert!(matches!(msgs.retry(&msg.id), Err(StoreError::Invalid(_))));
+    // retry on a plain pending message is allowed (clears any defer
+    // schedule); it only fails from delivered/acknowledged.
+    msgs.retry(&msg.id).expect("retry pending is a no-op");
     // failed -> acknowledged must fail (failed mail was never read).
     msgs.record_failure(&msg.id, None).expect("fail");
     assert!(matches!(
@@ -570,4 +570,31 @@ fn agent_ids_are_unique_within_same_millisecond() {
     let ids: std::collections::HashSet<String> = (0..1000).map(|_| new_agent_id()).collect();
     assert_eq!(ids.len(), 1000);
     assert!(ids.iter().all(|id| id.starts_with("ag_") && id.len() == 35));
+}
+
+#[test]
+fn defer_reschedules_without_consuming_attempts() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("defer_scope", &dir);
+    let msgs = store.messages();
+    let msg = msgs.send("ag_a", "ag_b", "busy recipient").expect("send");
+
+    msgs.defer(&msg.id, Some(1_999_999_999_999)).expect("defer");
+    let m = msgs.message(&msg.id).expect("get").expect("some");
+    assert_eq!(m.status, MessageStatus::Pending);
+    assert_eq!(m.attempt_count, 0);
+    assert_eq!(m.next_retry_at, Some(1_999_999_999_999));
+
+    // Deferred pending is not due before next_retry_at; retry() clears
+    // the schedule so it becomes due immediately.
+    assert!(msgs.outbox_due(1_000_000_000_000).expect("due").is_empty());
+    msgs.retry(&msg.id).expect("retry pending");
+    let m = msgs.message(&msg.id).expect("get").expect("some");
+    assert_eq!(m.status, MessageStatus::Pending);
+    assert_eq!(m.next_retry_at, None);
+    assert_eq!(msgs.outbox_due(0).expect("due").len(), 1);
+
+    // Defer on terminal states is rejected.
+    msgs.mark_delivered(&msg.id).expect("delivered");
+    assert!(msgs.defer(&msg.id, None).is_err());
 }

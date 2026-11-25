@@ -250,26 +250,30 @@ fn agent_blocked_keeps_message_pending() {
         .send("ag_other", &agent.agent_id, "blocked delivery")
         .unwrap();
 
-    // The blocked attempt is recorded as a failure (not delivered).
+    // The blocked attempt defers the message: still pending, scheduled,
+    // and — crucially — no delivery attempt was consumed.
     assert!(
-        wait_until(WAIT, "blocked attempt recorded", || {
+        wait_until(WAIT, "blocked defer recorded", || {
             pool.messages()
                 .message(&msg.id)
                 .map(|m| {
                     m.map(|m| {
-                        m.attempt_count >= 1 && m.status == herdr_pool_store::MessageStatus::Failed
+                        m.status == herdr_pool_store::MessageStatus::Pending
+                            && m.attempt_count == 0
+                            && m.next_retry_at.is_some()
                     })
                     .unwrap_or(false)
                 })
                 .unwrap_or(false)
         }),
-        "message should be failed after agent_blocked"
+        "message should stay pending+scheduled after agent_blocked"
     );
     let after = pool.messages().message(&msg.id).unwrap().unwrap();
-    assert_eq!(after.status, herdr_pool_store::MessageStatus::Failed);
+    assert_eq!(after.status, herdr_pool_store::MessageStatus::Pending);
+    assert_eq!(after.attempt_count, 0);
     assert!(
         after.next_retry_at.is_some(),
-        "blocked retry should be scheduled"
+        "blocked defer should be scheduled"
     );
     assert!(after.delivered_at.is_none());
 
@@ -346,7 +350,7 @@ fn pane_exited_marks_agent_offline_and_resubscribes() {
 #[test]
 fn delivery_worker_blocked_backoff_is_recorded() {
     // Unit-level check of the worker against the fake server, without the
-    // daemon event loop: one drain pass, agent_blocked → Failed + retry_at.
+    // daemon event loop: one drain pass, agent_blocked → deferred + retry_at.
     let server = FakeHerdr::start().unwrap();
     let project = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
@@ -392,8 +396,8 @@ fn delivery_worker_blocked_backoff_is_recorded() {
     assert_eq!(worker.drain_once().unwrap(), 1);
 
     let after = pool.messages().message(&msg.id).unwrap().unwrap();
-    assert_eq!(after.status, herdr_pool_store::MessageStatus::Failed);
-    assert_eq!(after.attempt_count, 1);
+    assert_eq!(after.status, herdr_pool_store::MessageStatus::Pending);
+    assert_eq!(after.attempt_count, 0);
     assert!(after.next_retry_at.is_some());
     // 15s blocked backoff — a second immediate drain must not retry.
     assert_eq!(worker.drain_once().unwrap(), 0);

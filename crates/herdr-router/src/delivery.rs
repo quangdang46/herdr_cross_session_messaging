@@ -11,7 +11,7 @@
 //! | `agent.prompt` outcome | action |
 //! |---|---|
 //! | success | `mark_delivered` |
-//! | `agent_blocked` | `record_failure(now + 15s)` — harness queues nothing; retry shortly |
+//! | `agent_blocked` | `defer(now + 15s)` — harness queues nothing; retry shortly, no attempt consumed |
 //! | `agent_not_ready` / `agent_not_found` / `agent_target_ambiguous` / stalled | `record_failure(now + backoff(attempts))` |
 //! | transport/timeout/other | `record_failure(now + backoff(attempts))` |
 //! | recipient offline > [`OFFLINE_DEAD_AFTER`] | dead-letter immediately + throttled `notification.show` |
@@ -189,9 +189,11 @@ impl DeliveryWorker {
                 tracing::info!(message = %msg.id, to = %msg.to_agent, "message delivered");
             }
             Err(err) if err.is_agent_blocked() => {
-                // Agent is alive but busy: nothing was sent. Short backoff —
-                // the next status transition or sweep retries it.
-                self.record_retry(messages, msg, BLOCKED_BACKOFF)?;
+                // Agent is alive but busy: nothing was sent. Defer without
+                // consuming an attempt — blocking is not a delivery
+                // failure, and dead-lettering busy agents' mail would lose
+                // it invisibly (dead rows never reach the inbox).
+                self.defer_retry(messages, msg, BLOCKED_BACKOFF)?;
             }
             Err(err) => {
                 let delay = if err.is_agent_not_found()
@@ -234,6 +236,18 @@ impl DeliveryWorker {
         // While offline, poll no faster than once a minute.
         let delay = retry_delay(msg.attempt_count).max(Duration::from_secs(60));
         self.record_retry(messages, msg, delay)
+    }
+
+    /// Defer a message without counting a delivery attempt (blocked path).
+    fn defer_retry(
+        &self,
+        messages: &MessageStore<'_>,
+        msg: &Message,
+        delay: Duration,
+    ) -> Result<()> {
+        let next = now_millis() + delay.as_millis() as i64;
+        messages.defer(&msg.id, Some(next))?;
+        Ok(())
     }
 
     /// Record a failed attempt with `next_retry_at = now + delay`.
