@@ -12,6 +12,12 @@ pub enum StoreError {
     /// IO failure.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// No matching row for a lookup that requires one.
+    #[error("not found: {0}")]
+    NotFound(String),
+    /// A peer/address target matched more than one agent.
+    #[error("ambiguous: {0}")]
+    Ambiguous(String),
     /// Invalid state transition or constraint violation.
     #[error("invalid: {0}")]
     Invalid(String),
