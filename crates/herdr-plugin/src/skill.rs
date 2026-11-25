@@ -242,6 +242,7 @@ pub fn install_skill_with_home(
     install_skill_inner(target_root, scope, home)
 }
 
+#[tracing::instrument(skip_all, name = "skill.install", level = "debug", fields(scope = ?scope))]
 fn install_skill_inner(
     target_root: &Path,
     scope: SkillScope,
@@ -273,6 +274,7 @@ pub fn uninstall_skill_with_home(
     uninstall_skill_inner(target_root, scope, home)
 }
 
+#[tracing::instrument(skip_all, name = "skill.uninstall", level = "debug", fields(scope = ?scope))]
 fn uninstall_skill_inner(
     target_root: &Path,
     scope: SkillScope,
@@ -418,6 +420,7 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 ///
 /// The existing directory (if any) is removed only after the temp copy is
 /// fully written and validated; callers must have verified ownership first.
+#[tracing::instrument(skip_all, name = "skill.write", level = "debug", fields(path = %dir.display()))]
 fn write_payload(dir: &Path) -> Result<()> {
     let parent = dir
         .parent()
@@ -507,6 +510,7 @@ fn validate_skill_dir(dir: &Path, expected_name: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

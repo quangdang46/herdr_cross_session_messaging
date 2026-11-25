@@ -9,6 +9,10 @@
 //! except long-lived calls (`events.subscribe`, `events.wait`, `agent.wait`,
 //! `agent.prompt` with `wait`, `pane.wait_for_output`) which stream frames.
 
+// No `unwrap()`/`expect()` in library code; integration tests live in
+// `tests/` (separate crates, unaffected by this lint).
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 pub mod client;
 pub mod error;
 pub mod events;

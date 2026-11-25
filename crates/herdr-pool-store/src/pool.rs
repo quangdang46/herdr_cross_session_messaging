@@ -113,6 +113,7 @@ pub struct ScopeIndex {
 
 impl ScopeIndex {
     /// Open (creating if needed) `<state>/index.db` and ensure its schema.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug")]
     pub fn open(state_dir: impl AsRef<Path>) -> Result<Self> {
         std::fs::create_dir_all(state_dir.as_ref())?;
         let conn = Connection::open(state_dir.as_ref().join("index.db"))?;
@@ -135,6 +136,7 @@ impl ScopeIndex {
 
     /// Record (or refresh) the canonical path for a scope key. Idempotent:
     /// re-registering the same pair is a no-op; `created_at` is preserved.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug")]
     pub fn register(&self, scope_key: &str, canonical_path: &str) -> Result<()> {
         let conn = lock(&self.conn);
         conn.execute(
@@ -147,6 +149,7 @@ impl ScopeIndex {
     }
 
     /// Look up the canonical path for a scope key.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug")]
     pub fn resolve(&self, scope_key: &str) -> Result<Option<String>> {
         let conn = lock(&self.conn);
         let path = conn
@@ -160,6 +163,7 @@ impl ScopeIndex {
     }
 
     /// All registered scopes.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug")]
     pub fn list(&self) -> Result<Vec<ScopeEntry>> {
         let conn = lock(&self.conn);
         let mut stmt = conn.prepare(

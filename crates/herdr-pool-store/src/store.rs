@@ -225,6 +225,7 @@ impl<'a> MessageStore<'a> {
     // ----- threads ---------------------------------------------------------
 
     /// Create an empty thread. `subject` is optional display metadata.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn create_thread(&self, subject: Option<&str>) -> Result<Thread> {
         let conn = self.pool.conn();
         let tx = conn.unchecked_transaction()?;
@@ -234,6 +235,7 @@ impl<'a> MessageStore<'a> {
     }
 
     /// Fetch a thread by id.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn thread(&self, thread_id: &str) -> Result<Option<Thread>> {
         let conn = self.pool.conn();
         let row = conn
@@ -247,6 +249,7 @@ impl<'a> MessageStore<'a> {
     }
 
     /// All threads in this scope, most recently active first.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn threads(&self) -> Result<Vec<Thread>> {
         let conn = self.pool.conn();
         let mut stmt = conn.prepare(&format!(
@@ -262,6 +265,7 @@ impl<'a> MessageStore<'a> {
 
     /// Send a message, creating a new thread. The thread subject defaults to
     /// the first line of `content` (truncated to 80 chars) for `threads` display.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn send(&self, from_agent: &str, to_agent: &str, content: &str) -> Result<Message> {
         self.insert_message(None, None, from_agent, to_agent, "message", content)
     }
@@ -269,6 +273,7 @@ impl<'a> MessageStore<'a> {
     /// Send a message into an existing thread.
     ///
     /// `kind` is free-form (`message`, `notice`, `reply`, ...).
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn send_in_thread(
         &self,
         thread_id: &str,
@@ -284,6 +289,7 @@ impl<'a> MessageStore<'a> {
     ///
     /// Accepts the original message id (`msg_...`). The returned message has
     /// `kind = "reply"`.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn reply(&self, message_id: &str, from_agent: &str, content: &str) -> Result<Message> {
         let original = self
             .message(message_id)?
@@ -382,6 +388,7 @@ impl<'a> MessageStore<'a> {
     // ----- reads -----------------------------------------------------------
 
     /// Fetch a message by id.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn message(&self, id: &str) -> Result<Option<Message>> {
         let conn = self.pool.conn();
         let row = conn
@@ -395,6 +402,7 @@ impl<'a> MessageStore<'a> {
     }
 
     /// All messages in a thread, oldest first.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn thread_messages(&self, thread_id: &str) -> Result<Vec<Message>> {
         let conn = self.pool.conn();
         let mut stmt = conn.prepare(&format!(
@@ -412,6 +420,7 @@ impl<'a> MessageStore<'a> {
     ///
     /// With `unread_only = true`, only `pending` + `delivered` are returned
     /// (i.e. not yet acknowledged).
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn inbox(&self, agent_id: &str, unread_only: bool) -> Result<Vec<Message>> {
         let conn = self.pool.conn();
         let sql = if unread_only {
@@ -440,6 +449,7 @@ impl<'a> MessageStore<'a> {
     /// Returns `pending` rows plus `failed` rows whose `next_retry_at` is NULL
     /// or <= `now_millis`, oldest first. `delivered`, `acknowledged`, and
     /// `dead` rows are never returned.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn outbox_due(&self, now_millis: i64) -> Result<Vec<Message>> {
         let conn = self.pool.conn();
         let mut stmt = conn.prepare(&format!(
@@ -460,6 +470,7 @@ impl<'a> MessageStore<'a> {
     ///
     /// This is the only path that marks a message delivered; it is what the
     /// delivery worker calls after `agent.prompt` succeeds.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn mark_delivered(&self, id: &str) -> Result<()> {
         self.transition(
             id,
@@ -479,6 +490,7 @@ impl<'a> MessageStore<'a> {
     /// delivered -> acknowledged. Sets `acked_at`.
     ///
     /// Called when the recipient reads or replies to the message.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn mark_acknowledged(&self, id: &str) -> Result<()> {
         self.transition(
             id,
@@ -500,6 +512,7 @@ impl<'a> MessageStore<'a> {
     ///
     /// `next_retry_at` is unix millis; pass `None` to make the row immediately
     /// due on the next [`Self::outbox_due`] sweep.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn record_failure(&self, id: &str, next_retry_at: Option<i64>) -> Result<MessageStatus> {
         let conn = self.pool.conn();
         let tx = conn.unchecked_transaction()?;
@@ -543,6 +556,7 @@ impl<'a> MessageStore<'a> {
     ///
     /// `delivered` and `acknowledged` messages can never return to `pending`
     /// (that would risk duplicate delivery of already-read mail).
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn retry(&self, id: &str) -> Result<()> {
         self.transition(
             id,

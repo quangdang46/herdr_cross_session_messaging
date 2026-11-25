@@ -173,6 +173,7 @@ impl Manifest {
     }
 
     /// Load and parse `herdr-plugin.toml` (or `path` if given) from disk.
+    #[tracing::instrument(skip_all, name = "manifest.load", level = "debug", fields(path = %path.display()))]
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|err| PluginError::Manifest(format!("read {}: {err}", path.display())))?;
@@ -279,6 +280,7 @@ fn require_argv(field: &str, argv: &[String]) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

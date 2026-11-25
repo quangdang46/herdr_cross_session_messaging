@@ -81,6 +81,7 @@ pub fn config_dir() -> Result<PathBuf> {
 }
 
 /// Create the state directory (and parents) if needed; returns the path.
+#[tracing::instrument(skip_all, name = "paths.ensure_state_dir", level = "debug")]
 pub fn ensure_state_dir() -> Result<PathBuf> {
     let dir = state_dir()?;
     std::fs::create_dir_all(&dir)?;
@@ -154,6 +155,7 @@ fn env_home(env: &EnvLookup<'_>) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::collections::HashMap;

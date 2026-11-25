@@ -15,6 +15,9 @@ pub enum RouterError {
     /// Plugin failure.
     #[error("plugin: {0}")]
     Plugin(#[from] herdr_plugin::PluginError),
+    /// IO failure (state dir, pidfile, log file).
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
     /// Daemon lifecycle failure.
     #[error("daemon: {0}")]
     Daemon(String),

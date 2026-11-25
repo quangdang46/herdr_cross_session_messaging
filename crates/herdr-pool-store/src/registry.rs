@@ -97,6 +97,7 @@ impl<'a> RegistryStore<'a> {
     /// Idempotent: re-upserting the same record converges to the same row.
     /// `first_seen_at` is preserved from the original insert; all other
     /// mutable fields (including `last_seen_at`) take the new values.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn upsert_agent(&self, agent: &AgentRecord) -> Result<()> {
         let conn = self.pool.conn();
         conn.execute(
@@ -134,6 +135,7 @@ impl<'a> RegistryStore<'a> {
     }
 
     /// Fetch one agent by `agent_id` (any status, including offline).
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn get_agent(&self, agent_id: &str) -> Result<Option<AgentRecord>> {
         let conn = self.pool.conn();
         let row = conn
@@ -148,6 +150,7 @@ impl<'a> RegistryStore<'a> {
 
     /// All agents in this scope. Offline agents are included only when
     /// `include_offline` is true.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn list_agents(&self, include_offline: bool) -> Result<Vec<AgentRecord>> {
         let conn = self.pool.conn();
         let sql = if include_offline {
@@ -166,11 +169,13 @@ impl<'a> RegistryStore<'a> {
     }
 
     /// Agents matching a pane id (usually 0 or 1 live row; history may exist).
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn find_by_pane(&self, pane_id: &str) -> Result<Vec<AgentRecord>> {
         self.find_agents("pane_id", pane_id)
     }
 
     /// Agents matching a terminal id.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn find_by_terminal(&self, terminal_id: &str) -> Result<Vec<AgentRecord>> {
         self.find_agents("terminal_id", terminal_id)
     }
@@ -180,6 +185,7 @@ impl<'a> RegistryStore<'a> {
     /// This is the stable-identity lookup `whoami` needs: the same Herdr
     /// terminal keeps the same `agent_id` across `pane.move` and restarts of
     /// the agent process.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn get_by_terminal(&self, terminal_id: &str) -> Result<Option<AgentRecord>> {
         let conn = self.pool.conn();
         let row = conn
@@ -198,6 +204,7 @@ impl<'a> RegistryStore<'a> {
 
     /// Agents matching an agent name (names are unique among *live* agents but
     /// may repeat historically).
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn find_by_name(&self, name: &str) -> Result<Vec<AgentRecord>> {
         self.find_agents("name", name)
     }
@@ -224,6 +231,7 @@ impl<'a> RegistryStore<'a> {
     /// 2. Union of `pane_id`, `terminal_id`, and `name` matches among
     ///    non-offline agents. More than one distinct `agent_id` →
     ///    [`StoreError::Ambiguous`]; none → [`StoreError::NotFound`].
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn resolve_peer(&self, target: &str) -> Result<AgentRecord> {
         let conn = self.pool.conn();
 
@@ -269,6 +277,7 @@ impl<'a> RegistryStore<'a> {
     ///
     /// Also refreshes `last_seen_at`. Fails with [`StoreError::NotFound`] if
     /// the agent is unknown.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn rekey_pane(&self, agent_id: &str, new_pane_id: &str) -> Result<()> {
         let conn = self.pool.conn();
         let changed = conn.execute(
@@ -285,6 +294,7 @@ impl<'a> RegistryStore<'a> {
     /// Offline agents are excluded from [`Self::list_agents`] (default),
     /// [`Self::get_by_terminal`], and [`Self::resolve_peer`] candidate
     /// matching. Fails with [`StoreError::NotFound`] for unknown ids.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn mark_offline(&self, agent_id: &str) -> Result<()> {
         let conn = self.pool.conn();
         let now = now_millis();

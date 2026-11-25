@@ -86,6 +86,7 @@ pub fn open_pool(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::scope::resolve_scope_for_pane;

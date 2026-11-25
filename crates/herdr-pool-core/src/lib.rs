@@ -10,6 +10,10 @@
 //!   `ScopeIndex::register` → `PoolStore::open`.
 //! - [`identity`]: `HERDR_*` env parsing and [`resolve_self`] for `whoami`.
 
+// No `unwrap()`/`expect()` in library code; inline `#[cfg(test)]` modules
+// are exempted per-module below.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 pub mod error;
 pub mod identity;
 pub mod pool;

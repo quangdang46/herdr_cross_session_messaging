@@ -5,6 +5,10 @@
 //! manifest, resolving Herdr-injected plugin/pane environment, and
 //! installing the `herdr-messaging` agent skill into per-agent skill dirs.
 
+// No `unwrap()`/`expect()` in library code; inline `#[cfg(test)]` modules
+// are exempted per-module below.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 pub mod error;
 pub mod manifest;
 pub mod paths;

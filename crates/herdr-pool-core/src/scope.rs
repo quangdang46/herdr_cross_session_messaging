@@ -168,7 +168,9 @@ pub fn scope_key(canonical_path: impl AsRef<Path>) -> ScopeKey {
     let digest = Sha256::digest(bytes);
     let mut hex = String::with_capacity(SCOPE_KEY_DIGEST_BYTES * 2);
     for byte in &digest[..SCOPE_KEY_DIGEST_BYTES] {
-        write!(hex, "{byte:02x}").expect("writing to String cannot fail");
+        // `write!` into a `String` is infallible; the `fmt::Result` is
+        // intentionally discarded rather than unwrapped.
+        let _ = write!(hex, "{byte:02x}");
     }
     ScopeKey(hex)
 }
@@ -251,6 +253,7 @@ pub fn resolve_scope_for_pane(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use herdr_protocol::{AgentStatus, MetadataMap};

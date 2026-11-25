@@ -25,6 +25,11 @@
 //! `pane.wait_for_output`) with [`FakeHerdr::push_event`],
 //! [`FakeHerdr::push_subscription_event`], [`FakeHerdr::push_response`] and
 //! [`FakeHerdr::push_error`].
+//!
+// Lint policy: no `unwrap()`/`expect()` in library code; mutex locking goes
+// through [`lock`], which tolerates poisoning. Inline `#[cfg(test)]` modules
+// are exempted per-module below.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
 
 mod canned;
 
@@ -39,6 +44,16 @@ use std::time::{Duration, Instant};
 pub use canned::canned_result;
 
 const SOCKET_FILE_NAME: &str = "herdr.sock";
+
+/// Lock a mutex, tolerating poisoning.
+///
+/// A panicked holder (e.g. a responder closure that panicked mid-request)
+/// leaves the shared state inspectable; for a test harness, recovering the
+/// guard and continuing is more useful than propagating the panic into
+/// unrelated assertions.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Errors returned by the fake server harness itself (not API errors, which
 /// are delivered to the client as `{"error": ...}` frames).
@@ -185,7 +200,7 @@ fn send_json(writer: &Arc<Mutex<Box<dyn Write + Send>>>, value: &Value) -> std::
     let mut buf = serde_json::to_vec(value)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     buf.push(b'\n');
-    let mut w = writer.lock().unwrap();
+    let mut w = lock(&**writer);
     w.write_all(&buf)?;
     w.flush()
 }
@@ -212,7 +227,7 @@ fn send_error(
 
 impl Inner {
     fn push_frame(&self, frame: &Value, subscriptions_only: bool) {
-        let conns = self.conns.lock().unwrap();
+        let conns = lock(&self.conns);
         for handle in conns.values() {
             if subscriptions_only && handle.kind != ConnKind::Subscription {
                 continue;
@@ -228,7 +243,7 @@ impl Inner {
     /// close the connection — mirroring the real server ending a wait.
     fn push_envelope(&self, request_id: &str, body: Value) {
         let handle = {
-            let mut conns = self.conns.lock().unwrap();
+            let mut conns = lock(&self.conns);
             let key = conns.iter().find_map(|(k, h)| {
                 h.pending_request_id
                     .as_ref()
@@ -252,7 +267,7 @@ impl Inner {
     }
 
     fn close_connections(&self) {
-        let handles: Vec<ConnHandle> = self.conns.lock().unwrap().drain().map(|(_, h)| h).collect();
+        let handles: Vec<ConnHandle> = lock(&self.conns).drain().map(|(_, h)| h).collect();
         for handle in handles {
             (handle.shutdown)();
         }
@@ -266,7 +281,7 @@ impl Inner {
             // Nudge the accept loop so `accept()` returns and observes the
             // shutdown flag, then wait for the thread to exit.
             let _ = std::os::unix::net::UnixStream::connect(&self.socket_path);
-            if let Some(handle) = self.accept_thread.lock().unwrap().take() {
+            if let Some(handle) = lock(&self.accept_thread).take() {
                 let _ = handle.join();
             }
         }
@@ -301,7 +316,7 @@ impl FakeHerdr {
             });
             let accept_inner = inner.clone();
             let accept_thread = std::thread::spawn(move || accept_loop(accept_inner, listener));
-            *inner.accept_thread.lock().unwrap() = Some(accept_thread);
+            *lock(&inner.accept_thread) = Some(accept_thread);
             Ok(Self { inner })
         }
 
@@ -344,7 +359,7 @@ impl FakeHerdr {
     /// `agent_not_ready`, `agent_not_found`, `agent_target_ambiguous`,
     /// `timeout`, or `invalid_params`.
     pub fn fail_next(&self, method: &str, code: &str, message: &str) {
-        let mut state = self.inner.state.lock().unwrap();
+        let mut state = lock(&self.inner.state);
         state
             .responders
             .entry(method.to_string())
@@ -361,15 +376,12 @@ impl FakeHerdr {
 
     /// All requests received so far, in arrival order.
     pub fn requests(&self) -> Vec<RecordedRequest> {
-        self.inner.state.lock().unwrap().requests.clone()
+        lock(&self.inner.state).requests.clone()
     }
 
     /// Requests received for `method` only, in arrival order.
     pub fn requests_for(&self, method: &str) -> Vec<RecordedRequest> {
-        self.inner
-            .state
-            .lock()
-            .unwrap()
+        lock(&self.inner.state)
             .requests
             .iter()
             .filter(|r| r.method == method)
@@ -401,14 +413,14 @@ impl FakeHerdr {
     /// Clear recorded requests and all scripted responders, returning the
     /// server to canned defaults.
     pub fn clear(&self) {
-        let mut state = self.inner.state.lock().unwrap();
+        let mut state = lock(&self.inner.state);
         state.requests.clear();
         state.responders.clear();
     }
 
     /// Clear only the recorded request log (scripted responders are kept).
     pub fn clear_requests(&self) {
-        self.inner.state.lock().unwrap().requests.clear();
+        lock(&self.inner.state).requests.clear();
     }
 
     // ------------------------------------------------------------------
@@ -418,7 +430,7 @@ impl FakeHerdr {
     /// Number of currently open held connections (subscription streams and
     /// pending waits).
     pub fn open_connections(&self) -> usize {
-        self.inner.conns.lock().unwrap().len()
+        lock(&self.inner.conns).len()
     }
 
     /// Wait until at least `min` connections are held open (or `timeout`).
@@ -495,10 +507,7 @@ pub struct MethodStub {
 
 impl MethodStub {
     fn queue(&self, responder: Responder) -> Self {
-        self.inner
-            .state
-            .lock()
-            .unwrap()
+        lock(&self.inner.state)
             .responders
             .entry(self.method.clone())
             .or_default()
@@ -621,7 +630,7 @@ fn handle_connection(inner: Arc<Inner>, stream: std::os::unix::net::UnixStream) 
             .to_string();
         let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
 
-        inner.state.lock().unwrap().requests.push(RecordedRequest {
+        lock(&inner.state).requests.push(RecordedRequest {
             id: id_to_string(&id),
             method: method.clone(),
             params: params.clone(),
@@ -630,7 +639,7 @@ fn handle_connection(inner: Arc<Inner>, stream: std::os::unix::net::UnixStream) 
 
         // Pop one scripted responder, else fall back to the canned default.
         let responder = {
-            let mut state = inner.state.lock().unwrap();
+            let mut state = lock(&inner.state);
             state
                 .responders
                 .get_mut(&method)
@@ -686,7 +695,7 @@ fn register_conn(
     pending_request_id: Option<Value>,
 ) {
     let id = inner.next_conn.fetch_add(1, Ordering::SeqCst);
-    inner.conns.lock().unwrap().insert(
+    lock(&inner.conns).insert(
         id,
         ConnHandle {
             writer,
@@ -698,6 +707,7 @@ fn register_conn(
 }
 
 #[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use herdr_protocol::{AgentStatus, HerdrClient, HerdrError, Subscription, SubscriptionFrame};

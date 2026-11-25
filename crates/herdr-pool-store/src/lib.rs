@@ -8,6 +8,10 @@
 //! IDs are `msg_`/`th_`/`ag_`-prefixed uuidv7 values. See [`store`] for the
 //! message status state machine.
 
+// No `unwrap()`/`expect()` in library code; integration tests live in
+// `tests/` (separate crates, unaffected by this lint).
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 pub mod error;
 pub mod migrations;
 pub mod pool;

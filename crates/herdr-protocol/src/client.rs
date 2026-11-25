@@ -172,6 +172,7 @@ impl HerdrClient {
     }
 
     /// Perform a single request/response exchange on a fresh connection.
+    #[tracing::instrument(skip_all, name = "herdr.request", level = "debug", fields(method = %method))]
     fn transact(&self, method: &str, params: &serde_json::Value) -> Result<ResponseResult> {
         let mut conn = open_connection(&self.socket_path, self.request_timeout)?;
         let id = self.next_request_id();
@@ -1196,6 +1197,12 @@ impl HerdrClient {
     ///
     /// The returned [`SubscriptionStream`] yields [`SubscriptionFrame`]s until
     /// the server closes the connection (surfaced as [`HerdrError::Closed`]).
+    #[tracing::instrument(
+        skip_all,
+        name = "herdr.request",
+        level = "debug",
+        fields(method = "events.subscribe")
+    )]
     pub fn events_subscribe(&self, subscriptions: Vec<Subscription>) -> Result<SubscriptionStream> {
         let params = EventsSubscribeParams { subscriptions };
         let value = serde_json::to_value(&params)
