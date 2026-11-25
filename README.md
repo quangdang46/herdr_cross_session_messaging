@@ -22,6 +22,14 @@ messages, and help each other — without the user acting as a relay.
 > active development (M3). Commands marked *(planned)* below are the committed
 > surface, not yet shipped. Design: [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 
+> **Why this exists:** I really enjoyed using Claude Code's
+> [cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging)
+> — sessions warning each other about breaking changes mid-task is genuinely
+> useful. But it only works between Claude Code sessions, shares one global
+> message space across every folder on the machine, and agents don't know the
+> feature exists until you remind them. So I built the same idea for *any*
+> agent inside Herdr, scoped per project folder.
+
 ## TL;DR
 
 ### The problem
@@ -52,7 +60,7 @@ runtime.
 | Delivery tracking | ✅ `pending→delivered→acked` | ❌ fire-and-forget | ❌ |
 | Retry while peer busy/blocked | ✅ daemon backoff + dead-letter | ❌ `agent_blocked` error | ❌ |
 | Recipient pulls own inbox | ✅ `herdr-pool inbox` | ❌ prompt lands as task input | ❌ |
-| Agent self-service skill | ✅ `herdr-messaging` SKILL.md | ❌ you write the prompts | ❌ |
+| Agent self-service skill | ✅ `herdr-messaging` SKILL.md auto-installed | ❌ you write the prompts | ❌ |
 | Cross-machine / cloud | ❌ local Herdr only | ❌ | ❌ |
 | Broadcast | ❌ by design (MVP) | manual loop | manual |
 
