@@ -95,7 +95,9 @@ impl Fx {
     fn stdout_json(out: &Output) -> Value {
         assert!(
             out.status.success(),
-            "stderr: {}",
+            "status: {:?}\nstdout: {}\nstderr: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
         serde_json::from_slice(&out.stdout).expect("stdout is JSON")

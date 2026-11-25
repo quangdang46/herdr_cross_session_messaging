@@ -398,14 +398,17 @@ pub fn resolve_peer(pool: &PoolContext, query: &str) -> CmdResult<AgentRecord> {
         .map_err(Failure::from)
 }
 
-/// Current delivery target for a registry record: `terminal_id` preferred,
-/// `pane_id` fallback (mirrors the router delivery worker).
+/// Current delivery target for a registry record. `agent.prompt` accepts
+/// pane_id and agent name but NOT terminal_id (term_* → agent_not_found),
+/// so pane_id is preferred (kept current by pane.moved rekeys), then name,
+/// then terminal_id as a last resort. Mirrors the router delivery worker.
 pub fn delivery_target(record: &AgentRecord) -> Option<String> {
     record
-        .terminal_id
+        .pane_id
         .clone()
-        .filter(|t| !t.is_empty())
-        .or_else(|| record.pane_id.clone().filter(|p| !p.is_empty()))
+        .filter(|p| !p.is_empty())
+        .or_else(|| record.name.clone().filter(|n| !n.is_empty()))
+        .or_else(|| record.terminal_id.clone().filter(|t| !t.is_empty()))
 }
 
 /// Ensure the router daemon is running; used by delivery-oriented commands

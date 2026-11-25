@@ -189,10 +189,11 @@ fn send_delivers_envelope_and_marks_delivered() {
     ))
     .unwrap();
 
-    // Exactly one agent.prompt went out, addressed at the peer's terminal.
+    // Exactly one agent.prompt went out, addressed at the peer's pane_id
+    // (agent.prompt rejects terminal_id targets).
     let prompts = f.server.requests_for("agent.prompt");
     assert_eq!(prompts.len(), 1);
-    assert_eq!(prompts[0].params["target"], json!("term_peer"));
+    assert_eq!(prompts[0].params["target"], json!("w1:p2"));
     let text = prompts[0].params["text"].as_str().unwrap();
     assert!(
         text.starts_with("[herdr-pool] msg msg_"),

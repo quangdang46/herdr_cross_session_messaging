@@ -273,8 +273,9 @@ fn pane_moved_keeps_agent_id_and_rekeys_pane() {
     assert_eq!(after.agent_id, agent_id, "agent_id must survive pane.moved");
     assert_eq!(after.terminal_id.as_deref(), Some("term_a"));
 
-    // Next delivery resolves against the *current* record: terminal id is
-    // the stable prompt anchor, so the prompt still targets term_a.
+    // Next delivery resolves against the *current* record: pane_id is the
+    // preferred prompt target (agent.prompt rejects terminal_id), and the
+    // registry re-keyed it to w1:p9 on pane.moved.
     let msg = pool
         .messages()
         .send("ag_peer", &agent_id, "after the move")
@@ -297,7 +298,7 @@ fn pane_moved_keeps_agent_id_and_rekeys_pane() {
                 .is_some_and(|t| t.contains(&msg.id))
         })
         .unwrap();
-    assert_eq!(req.params["target"], "term_a");
+    assert_eq!(req.params["target"], "w1:p9");
     assert_eq!(
         pool.messages().message(&msg.id).unwrap().unwrap().status,
         MessageStatus::Delivered

@@ -165,13 +165,17 @@ impl DeliveryWorker {
             return self.handle_offline_recipient(messages, msg, &recipient);
         }
 
-        // Resolve the CURRENT target on every attempt: terminal id is the
-        // stable anchor, pane id the fallback. Never cache across attempts.
+        // Resolve the CURRENT target on every attempt. `agent.prompt`
+        // accepts pane_id and agent name but NOT terminal_id (verified:
+        // term_* → agent_not_found), so pane_id is preferred; it is kept
+        // current by the registry's pane.moved rekey. Name is the fallback
+        // for records captured before pane_id was known; terminal_id last.
         let target = recipient
-            .terminal_id
+            .pane_id
             .clone()
-            .filter(|t| !t.is_empty())
-            .or_else(|| recipient.pane_id.clone().filter(|p| !p.is_empty()));
+            .filter(|p| !p.is_empty())
+            .or_else(|| recipient.name.clone().filter(|n| !n.is_empty()))
+            .or_else(|| recipient.terminal_id.clone().filter(|t| !t.is_empty()));
         let Some(target) = target else {
             return self.record_retry(messages, msg, retry_delay(msg.attempt_count));
         };

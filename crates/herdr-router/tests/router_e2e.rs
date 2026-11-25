@@ -204,7 +204,7 @@ fn daemon_snapshot_subscribes_status_events_and_delivers() {
                 .is_some_and(|t| t.contains(&msg.id))
         })
         .unwrap();
-    assert_eq!(delivery_req.params["target"], "term_a");
+    assert_eq!(delivery_req.params["target"], "w1:p1");
 
     handle.shutdown();
     handle.join();

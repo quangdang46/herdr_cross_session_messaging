@@ -327,7 +327,7 @@ fn messaging_happy_path_two_agents_one_scope() {
     assert_eq!(prompts.len(), 2, "expected send + reply prompts");
 
     let p1 = prompts[0].params["text"].as_str().unwrap();
-    assert_eq!(prompts[0].params["target"], "term_b");
+    assert_eq!(prompts[0].params["target"], "w1:p2");
     assert!(p1.starts_with("[herdr-pool] msg "), "{p1}");
     assert!(p1.contains(&msg_id));
     assert!(p1.contains(&thread_id));
@@ -336,7 +336,7 @@ fn messaging_happy_path_two_agents_one_scope() {
     assert!(p1.contains(&format!("Reply: herdr-pool reply {msg_id}")));
 
     let p2 = prompts[1].params["text"].as_str().unwrap();
-    assert_eq!(prompts[1].params["target"], "term_a");
+    assert_eq!(prompts[1].params["target"], "w1:p1");
     assert!(p2.starts_with("[herdr-pool] msg "));
     assert!(p2.contains(&reply_id));
     assert!(p2.contains(&thread_id));
