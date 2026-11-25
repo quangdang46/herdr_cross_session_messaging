@@ -1,0 +1,34 @@
+{
+ "$defs": {
+  "ErrorBody": {
+   "properties": {
+    "code": {
+     "type": "string"
+    },
+    "message": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "code",
+    "message"
+   ],
+   "type": "object"
+  }
+ },
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "properties": {
+  "error": {
+   "$ref": "#/schemas/error_response/$defs/ErrorBody"
+  },
+  "id": {
+   "type": "string"
+  }
+ },
+ "required": [
+  "id",
+  "error"
+ ],
+ "title": "ErrorResponse",
+ "type": "object"
+}
