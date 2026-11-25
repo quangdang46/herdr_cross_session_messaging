@@ -119,10 +119,21 @@ fn forward(ctx: &Ctx, action: &DaemonAction) -> CmdResult<()> {
         DaemonAction::Stop => "stop",
         _ => unreachable!(),
     };
-    let status = std::process::Command::new(bin)
-        .arg(sub)
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg(sub)
         .env("HERDR_POOL_STATE_DIR", &ctx.state_dir)
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+    // `start` needs the same socket the CLI resolved: routerd reads
+    // HERDR_SOCKET_PATH, so an explicit --socket-path must be exported.
+    if let Some(path) = &ctx.socket_path_override {
+        cmd.env("HERDR_SOCKET_PATH", path);
+    }
+    // Under --json the child's "started (pid N)" line would corrupt the
+    // JSON envelope; the ack below carries the same info.
+    if ctx.json {
+        cmd.stdout(Stdio::null());
+    }
+    let status = cmd
         .status()
         .map_err(|e| Failure::runtime(format!("spawn herdr-routerd {sub}: {e}")))?;
     if !status.success() {

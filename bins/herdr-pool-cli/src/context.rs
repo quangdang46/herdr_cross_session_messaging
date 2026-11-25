@@ -134,7 +134,7 @@ pub struct Ctx {
     /// `--socket-path` override, propagated to spawned `herdr-routerd` via
     /// `HERDR_SOCKET_PATH` (env-resolved paths need no propagation — the
     /// child inherits the environment).
-    socket_path_override: Option<PathBuf>,
+    pub(crate) socket_path_override: Option<PathBuf>,
     /// When true, delivery-oriented commands may spawn `herdr-routerd`
     /// if no daemon is running (see [`ensure_daemon`]). Tests set false.
     pub autostart_daemon: bool,

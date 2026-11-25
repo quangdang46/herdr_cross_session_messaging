@@ -8,8 +8,12 @@
 //!
 //! ```text
 //! pending --mark_delivered--> delivered --mark_acknowledged--> acknowledged
-//!    |                            ^
-//!    | record_failure             | record_failure is NOT allowed here
+//!    |  \                          ^
+//!    |   \-- mark_acknowledged     | record_failure is NOT allowed here
+//!    |      (explicit read =        |
+//!    |       consumed; cancels      |
+//!    |       pending delivery)      |
+//!    | record_failure              |
 //!    v                            |
 //!  failed --record_failure--> failed (until MAX_DELIVERY_ATTEMPTS) -> dead
 //!    |                            |
@@ -487,14 +491,17 @@ impl<'a> MessageStore<'a> {
         )
     }
 
-    /// delivered -> acknowledged. Sets `acked_at`.
+    /// delivered|pending -> acknowledged. Sets `acked_at`.
     ///
     /// Called when the recipient reads or replies to the message.
+    /// `pending -> acknowledged` is allowed so a recipient that reads mail
+    /// via `inbox` *before* the delivery worker prompts it does not get a
+    /// duplicate prompt later — acknowledging pending mail consumes it.
     #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn mark_acknowledged(&self, id: &str) -> Result<()> {
         self.transition(
             id,
-            &[MessageStatus::Delivered],
+            &[MessageStatus::Delivered, MessageStatus::Pending],
             "acknowledged",
             |tx, now| {
                 tx.execute(

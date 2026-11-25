@@ -154,6 +154,22 @@ fn happy_path_pending_delivered_acknowledged() {
 }
 
 #[test]
+fn pending_can_be_acknowledged_directly() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("scope-pending-ack", &dir);
+    let msgs = store.messages();
+
+    // A recipient that reads pending mail via inbox consumes it: the
+    // outbox must never deliver it again.
+    let msg = msgs.send("ag_a", "ag_b", "early read").expect("send");
+    msgs.mark_acknowledged(&msg.id).expect("ack pending");
+    let m = msgs.message(&msg.id).expect("get").expect("some");
+    assert_eq!(m.status, MessageStatus::Acknowledged);
+    assert!(m.acked_at.is_some());
+    assert!(msgs.outbox_due(i64::MAX).expect("due").is_empty());
+}
+
+#[test]
 fn invalid_transitions_are_rejected() {
     let (_tmp, dir) = state_dir();
     let store = open_store("scope-trans", &dir);
@@ -163,11 +179,13 @@ fn invalid_transitions_are_rejected() {
     // delivered -> pending via retry must fail while still pending too? retry
     // requires failed|dead.
     assert!(matches!(msgs.retry(&msg.id), Err(StoreError::Invalid(_))));
-    // pending -> acknowledged must fail (must go through delivered).
+    // failed -> acknowledged must fail (failed mail was never read).
+    msgs.record_failure(&msg.id, None).expect("fail");
     assert!(matches!(
         msgs.mark_acknowledged(&msg.id),
         Err(StoreError::Invalid(_))
     ));
+    msgs.retry(&msg.id).expect("retry");
     // record_failure on acknowledged must fail.
     msgs.mark_delivered(&msg.id).expect("delivered");
     msgs.mark_acknowledged(&msg.id).expect("ack");
@@ -543,4 +561,13 @@ fn scope_index_register_resolve_list() {
     assert!(list
         .iter()
         .any(|e| e.scope_key == "k1" && e.canonical_path == "/proj/one"));
+}
+
+#[test]
+fn agent_ids_are_unique_within_same_millisecond() {
+    // Regression: ids truncated to the uuidv7 timestamp prefix collided for
+    // agents registered in the same ms, silently merging registry rows.
+    let ids: std::collections::HashSet<String> = (0..1000).map(|_| new_agent_id()).collect();
+    assert_eq!(ids.len(), 1000);
+    assert!(ids.iter().all(|id| id.starts_with("ag_") && id.len() == 35));
 }

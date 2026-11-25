@@ -17,15 +17,16 @@ use crate::store::now_millis;
 /// Status string used for agents that have exited or vanished from Herdr.
 pub const STATUS_OFFLINE: &str = "offline";
 
-/// Generate a fresh agent id: `ag_<first 12 hex chars of uuidv7>`.
+/// Generate a fresh agent id: `ag_<uuidv7 hex>`.
 ///
-/// 48 bits of time-ordered randomness — plenty for per-scope agent counts.
+/// The full uuidv7 is used (like `msg_`/`th_` ids): truncating to the
+/// leading hex chars would keep only the 48-bit timestamp field and
+/// collide for any two agents registered within the same millisecond.
 /// Callers persist the returned id in [`AgentRecord::agent_id`]; it stays
 /// stable for the life of the record even across `pane.move` and agent
 /// restarts (look up by `terminal_id` via [`RegistryStore::get_by_terminal`]).
 pub fn new_agent_id() -> String {
-    let simple = uuid::Uuid::now_v7().simple().to_string();
-    format!("ag_{}", &simple[..12])
+    format!("ag_{}", uuid::Uuid::now_v7().simple())
 }
 
 /// A row from the `agents` table.

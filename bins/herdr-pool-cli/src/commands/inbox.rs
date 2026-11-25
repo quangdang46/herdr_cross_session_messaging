@@ -76,10 +76,10 @@ fn list_inbox(ctx: &Ctx, env: &EnvLookup<'_>, unread: bool) -> CmdResult<()> {
 
 /// Shared `read` path for `inbox read` and `message read`.
 ///
-/// Marks the message `acknowledged` when it is `delivered` (the only legal
-/// source state for that transition) and only when it is addressed to the
-/// caller. `pending` mail cannot be acknowledged yet — the store has no
-/// pending→acknowledged edge — so it is shown with a note instead.
+/// Marks the message `acknowledged` when it is `delivered` or still
+/// `pending` (an explicit read consumes pending mail so the delivery
+/// worker never prompts it again) and only when addressed to the caller.
+/// `failed`/`dead`/`acknowledged` mail is shown as-is.
 pub fn read_message(ctx: &Ctx, env: &EnvLookup<'_>, id: &str) -> CmdResult<()> {
     let identity = resolve_identity(ctx, env)?;
     let pool = open_identity_pool(ctx, &identity)?;
@@ -98,9 +98,13 @@ pub fn read_message(ctx: &Ctx, env: &EnvLookup<'_>, id: &str) -> CmdResult<()> {
         )));
     }
 
-    // Acknowledge only from `delivered`; pending mail isn't readable-as-ack
-    // yet and acknowledged mail is already terminal for this purpose.
-    if msg.status == herdr_pool_store::MessageStatus::Delivered {
+    // Acknowledge from `delivered` or `pending`; failed/dead/acknowledged
+    // mail has nothing left to consume.
+    let was_pending = msg.status == herdr_pool_store::MessageStatus::Pending;
+    if matches!(
+        msg.status,
+        herdr_pool_store::MessageStatus::Delivered | herdr_pool_store::MessageStatus::Pending
+    ) {
         pool.pool.messages().mark_acknowledged(id)?;
     }
     let msg = pool.pool.messages().message(id)?.unwrap_or(msg);
@@ -121,8 +125,8 @@ pub fn read_message(ctx: &Ctx, env: &EnvLookup<'_>, id: &str) -> CmdResult<()> {
         }
         println!("---");
         println!("{}", msg.content);
-        if msg.status == herdr_pool_store::MessageStatus::Pending {
-            eprintln!("note: message is still pending delivery; not acknowledged");
+        if was_pending {
+            eprintln!("note: message was still pending delivery; read consumed it");
         }
     }
     Ok(())
