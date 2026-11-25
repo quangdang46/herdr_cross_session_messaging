@@ -6,6 +6,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["herdr", "sqlite", "rusqlite", "messaging", "storage"]
+categories = ["database"]
 
 [dependencies]
 herdr-protocol.workspace = true

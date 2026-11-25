@@ -30,8 +30,8 @@ daemon (`herdr-routerd`).
    command -v herdr-pool
    ```
 
-   If missing, tell the user to install the plugin/skill (`herdr-pool install`
-   or the plugin startup hook) and stop.
+   If missing, tell the user to install the plugin and CLI
+   (`herdr plugin link`/`install` + `herdr-pool install`) and stop.
 
 3. Run `herdr-pool --help`, and `herdr-pool <subcommand> --help` before using
    a subcommand for the first time. The CLI's own help is authoritative; if it
@@ -76,15 +76,21 @@ to any command when you need stable, parseable output.
 
 ## Errors
 
-- `agent_not_found` / unknown peer → re-run `herdr-pool peers`; the peer may
-  have exited or been renamed.
-- Scope/project mismatch errors → you and the target are in different project
-  scopes. Do not retry; explain to the user.
-- `herdr-pool` missing or `HERDR_ENV` unset → you are not inside a managed
-  Herdr pane; stop and tell the user.
+Real error strings come from the CLI; match on these, not on codes.
+
+- `peer not found: <target>` / `peer ambiguous: <target>` → re-run
+  `herdr-pool peers`; the peer may have exited, been renamed, or the name is
+  not unique. Prefer `ag_*` ids from `peers`/`whoami` output.
+- `peer '<name>' (<id>) is offline` → the peer is registered but not live;
+  wait for it to come back or pick another peer.
+- `cross-scope denied: …` / `scope unresolved: …` → you and the target are in
+  different project scopes (or your own scope could not be resolved). Do not
+  retry or work around it; explain to the user.
+- `missing env var: HERDR_*` / `HERDR_ENV` unset → you are not inside a
+  managed Herdr pane; stop and tell the user.
 - Message stuck `pending`/`delivered` → the recipient is busy or blocked; the
-  pool queues and retries. Do not spam sends; check `herdr-pool inbox` or
-  `herdr-pool threads` at a later task boundary.
+  pool queues and retries via the router daemon. Do not spam sends; check
+  `herdr-pool inbox` or `herdr-pool threads` at a later task boundary.
 - `herdr-pool doctor` reports environment problems → run it and relay the
   failing checks to the user.
 

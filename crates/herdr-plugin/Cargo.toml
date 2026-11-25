@@ -6,6 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["herdr", "plugin", "skills", "manifest"]
+# NOTE: not publishable to crates.io as-is — src/skill.rs embeds
+# ../../../skills/herdr-messaging via include_str!, which lives outside the
+# crate root and cannot be packaged. publish=false until the skill payload
+# moves under this crate (or is fetched at build time). See CHANGELOG/ro3.
+publish = false
 
 [dependencies]
 serde.workspace = true

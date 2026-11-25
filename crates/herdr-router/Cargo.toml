@@ -6,6 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["herdr", "daemon", "messaging", "router", "delivery"]
+# Depends on herdr-plugin/herdr-pool-core (publish=false — see those crates).
+publish = false
 
 [dependencies]
 herdr-protocol.workspace = true

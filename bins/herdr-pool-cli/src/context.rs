@@ -131,6 +131,10 @@ pub struct Ctx {
     pub client: HerdrClient,
     /// Plugin state dir (`--state-dir` or env-resolved).
     pub state_dir: PathBuf,
+    /// `--socket-path` override, propagated to spawned `herdr-routerd` via
+    /// `HERDR_SOCKET_PATH` (env-resolved paths need no propagation — the
+    /// child inherits the environment).
+    socket_path_override: Option<PathBuf>,
     /// When true, delivery-oriented commands may spawn `herdr-routerd`
     /// if no daemon is running (see [`ensure_daemon`]). Tests set false.
     pub autostart_daemon: bool,
@@ -153,6 +157,7 @@ impl Ctx {
             json: globals.json,
             client,
             state_dir,
+            socket_path_override: globals.socket_path.clone(),
             autostart_daemon: true,
         })
     }
@@ -164,6 +169,7 @@ impl Ctx {
             json,
             client,
             state_dir,
+            socket_path_override: None,
             autostart_daemon: false,
         }
     }
@@ -422,8 +428,19 @@ pub fn ensure_daemon(ctx: &Ctx) -> CmdResult<()> {
     let mut cmd = std::process::Command::new(bin);
     cmd.arg("start");
     // Propagate the resolved state dir so the daemon and this CLI agree even
-    // when --state-dir overrode the env resolution.
+    // when --state-dir overrode the env resolution. Same for --socket-path:
+    // the daemon resolves its socket from HERDR_SOCKET_PATH, so an explicit
+    // flag must be exported or the daemon would attach to a different server.
     cmd.env("HERDR_POOL_STATE_DIR", &ctx.state_dir);
+    if let Some(path) = &ctx.socket_path_override {
+        cmd.env("HERDR_SOCKET_PATH", path);
+    }
+    // The child's stdout would corrupt `--json` output — `herdr-routerd
+    // start` prints a "started (pid N)" line. Daemon logs already go to
+    // <state>/logs/routerd.log, so silence the wrapper entirely.
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     match cmd.status() {
         Ok(status) if status.success() => {
             tracing::info!("router daemon started");

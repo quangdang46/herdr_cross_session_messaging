@@ -6,6 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["herdr", "messaging", "scope", "registry", "agents"]
+# Depends on herdr-plugin (publish=false — see that crate's note).
+publish = false
 
 [dependencies]
 herdr-protocol.workspace = true

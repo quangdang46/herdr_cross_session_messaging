@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["herdr", "cli", "messaging", "agents", "inbox"]
+categories = ["command-line-utilities"]
+# Depends on publish=false crates + dev-dep herdr-testkit; install via
+# `cargo install --git` or GitHub release binaries instead. See CHANGELOG.
+publish = false
 
 [[bin]]
 name = "herdr-pool"
