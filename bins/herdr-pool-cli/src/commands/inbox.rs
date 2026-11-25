@@ -3,7 +3,7 @@
 //! `inbox` lists messages addressed to this agent (`pending`, `delivered`,
 //! `acknowledged`; `--unread` restricts to pending+delivered).
 //! `inbox read <id>` / `message read <id>` mark the message acknowledged
-//! (when it is `delivered`) and print the full content.
+//! (when it is `pending` or `delivered`) and print the full content.
 
 use herdr_plugin::paths::EnvLookup;
 use herdr_pool_store::Message;
