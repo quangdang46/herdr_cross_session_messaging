@@ -1,0 +1,21 @@
+{"name":"ping","method":"ping","params":{}}
+{"name":"agent_prompt","method":"agent.prompt","params":{"target":"reviewer","text":"please rebase","wait":{"until":["idle","done"],"timeout_ms":30000}}}
+{"name":"agent_prompt_no_wait","method":"agent.prompt","params":{"target":"w1:p1","text":"hi"}}
+{"name":"agent_wait","method":"agent.wait","params":{"target":"builder","until":["idle"],"timeout_ms":60000}}
+{"name":"agent_read","method":"agent.read","params":{"target":"reviewer","source":"recent","format":"text","lines":200}}
+{"name":"agent_read_no_strip","method":"agent.read","params":{"target":"reviewer","source":"visible","strip_ansi":false}}
+{"name":"agent_send_keys","method":"agent.send_keys","params":{"target":"reviewer","keys":["enter"]}}
+{"name":"agent_start","method":"agent.start","params":{"name":"reviewer","kind":"claude","pane_id":"w1:p1","args":["--flag"],"timeout_ms":30000}}
+{"name":"agent_rename","method":"agent.rename","params":{"target":"reviewer","name":"reviewer-2"}}
+{"name":"pane_read","method":"pane.read","params":{"pane_id":"w1:p1","source":"recent","lines":50}}
+{"name":"pane_send_text","method":"pane.send_text","params":{"pane_id":"w1:p1","text":"ls -la\n"}}
+{"name":"pane_send_keys","method":"pane.send_keys","params":{"pane_id":"w1:p1","keys":["ctrl+c"]}}
+{"name":"pane_wait_for_output","method":"pane.wait_for_output","params":{"pane_id":"w1:p1","source":"recent","match":{"type":"substring","value":"done"},"timeout_ms":10000}}
+{"name":"events_subscribe","method":"events.subscribe","params":{"subscriptions":[{"type":"pane.agent_detected"},{"type":"pane.output_matched","pane_id":"w1:p1","source":"recent","match":{"type":"regex","value":"build.*"},"lines":100},{"type":"pane.agent_status_changed","pane_id":"w1:p1","agent_status":"working"},{"type":"workspace.created"}]}}
+{"name":"events_wait","method":"events.wait","params":{"match_event":{"event":"pane_agent_status_changed","pane_id":"w1:p1","agent_status":"idle"},"timeout_ms":5000}}
+{"name":"notification_show","method":"notification.show","params":{"title":"Build done","body":"in 12s","position":"bottom_right","sound":"done"}}
+{"name":"layout_set_split_ratio","method":"layout.set_split_ratio","params":{"path":[true,false],"ratio":0.3,"pane_id":"w1:p1"}}
+{"name":"worktree_remove","method":"worktree.remove","params":{"workspace_id":"w3","force":true,"trust_repository":true}}
+{"name":"tab_move","method":"tab.move","params":{"tab_id":"w1:t1","insert_index":0}}
+{"name":"workspace_close","method":"workspace.close","params":{"workspace_id":"w1","close_group":false}}
+{"name":"pane_report_agent","method":"pane.report_agent","params":{"pane_id":"w1:p1","source":"plugin","agent":"custom","state":"working","seq":12}}

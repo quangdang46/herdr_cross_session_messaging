@@ -18,6 +18,10 @@ pub enum HerdrError {
     /// Herdr returned an error envelope.
     #[error("herdr api {code}: {message}")]
     Api { code: String, message: String },
+    /// The platform or configuration does not support this operation
+    /// (e.g. Windows named pipes are not implemented yet).
+    #[error("unsupported: {0}")]
+    Unsupported(String),
 }
 
 impl HerdrError {
@@ -43,6 +47,14 @@ impl HerdrError {
                 if matches!(code.as_str(),
                     "agent_blocked" | "agent_not_ready" | "agent_prompt_stalled"
                     | "agent_not_running" | "timeout" | "server_unavailable"))
+    }
+    /// True when the agent target was ambiguous (2+ matches).
+    pub fn is_agent_target_ambiguous(&self) -> bool {
+        matches!(self, HerdrError::Api { code, .. } if code == "agent_target_ambiguous")
+    }
+    /// True when the agent is not in a promptable state.
+    pub fn is_agent_not_ready(&self) -> bool {
+        matches!(self, HerdrError::Api { code, .. } if code == "agent_not_ready")
     }
 }
 

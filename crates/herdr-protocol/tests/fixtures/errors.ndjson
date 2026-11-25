@@ -1,0 +1,14 @@
+{"name":"agent_blocked","code":"agent_blocked","message":"agent is blocked on a permission prompt; nothing was sent"}
+{"name":"agent_not_ready","code":"agent_not_ready","message":"agent is not ready to accept prompts"}
+{"name":"agent_target_ambiguous","code":"agent_target_ambiguous","message":"agent target 'builder' matched 2 agents"}
+{"name":"agent_not_found","code":"agent_not_found","message":"agent target 'ghost' not found"}
+{"name":"timeout","code":"timeout","message":"timed out waiting for agent status"}
+{"name":"invalid_params","code":"invalid_params","message":"params.target: invalid type: integer `42`, expected a string"}
+{"name":"agent_prompt_stalled","code":"agent_prompt_stalled","message":"no agent activity observed for ~5s after prompt"}
+{"name":"agent_prompt_failed","code":"agent_prompt_failed","message":"failed to submit prompt to terminal"}
+{"name":"agent_not_running","code":"agent_not_running","message":"agent is no longer running"}
+{"name":"empty_agent_prompt","code":"empty_agent_prompt","message":"prompt text must not be empty"}
+{"name":"pane_not_found","code":"pane_not_found","message":"pane w1:p99 not found"}
+{"name":"events_lost","code":"events_lost","message":"event subscription fell behind retained history; resubscribe and resync with session.snapshot"}
+{"name":"popup_not_open","code":"popup_not_open","message":"no popup is open"}
+{"name":"invalid_request","code":"invalid_request","message":"invalid request: unknown method"}

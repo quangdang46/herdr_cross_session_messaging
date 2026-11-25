@@ -12,7 +12,20 @@
 pub mod client;
 pub mod error;
 pub mod events;
+pub mod params;
+pub mod results;
 pub mod types;
 
-pub use client::HerdrClient;
+pub use client::{
+    is_valid_agent_name, resolve_socket_path, HerdrClient, SubscriptionStream,
+    DEFAULT_SESSION_NAME, MAX_LINE_BYTES, SESSION_ENV_VAR, SOCKET_PATH_ENV_VAR,
+};
 pub use error::{HerdrError, Result};
+pub use events::{
+    EventData, EventEnvelope, EventKind, EventMatch, OutputMatch, PaneAgentStatusChangedEvent,
+    PaneOutputMatchedEvent, PaneScrollChangedEvent, Subscription, SubscriptionEventData,
+    SubscriptionEventEnvelope, SubscriptionEventKind, SubscriptionFrame,
+};
+pub use params::*;
+pub use results::{ErrorBody, Request, ResponseEnvelope, ResponseResult};
+pub use types::*;

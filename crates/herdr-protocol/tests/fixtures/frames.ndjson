@@ -1,0 +1,9 @@
+{"event":"pane.output_matched","data":{"pane_id":"w1:p1","matched_line":"build finished in 12s","read":{"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1","source":"recent_unwrapped","format":"text","text":"compiling...\nbuild finished in 12s\n","revision":44,"truncated":false}}}
+{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p1","workspace_id":"w1","agent_status":"working","agent":"claude","title":"fixing tests","display_agent":"Claude","state_labels":{"phase":"edit"}}}
+{"event":"pane.scroll_changed","data":{"pane_id":"w1:p1","workspace_id":"w1","scroll":{"offset_from_bottom":5,"max_offset_from_bottom":40,"viewport_rows":24}}}
+{"event":"pane_agent_detected","data":{"type":"pane_agent_detected","pane_id":"w1:p2","workspace_id":"w1","agent":"codex","final_status":"idle","released":false}}
+{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"w1:p2","workspace_id":"w1","agent_status":"blocked","agent":"codex"}}
+{"event":"pane_moved","data":{"type":"pane_moved","pane":{"pane_id":"w2:p1","workspace_id":"w2","tab_id":"w2:t1","terminal_id":"term_a","agent_status":"idle","revision":12,"focused":true},"previous_pane_id":"w1:p1","previous_workspace_id":"w1","previous_tab_id":"w1:t1"}}
+{"event":"workspace_created","data":{"type":"workspace_created","workspace":{"workspace_id":"w9","label":"scratch","number":9,"pane_count":1,"tab_count":1,"active_tab_id":"w9:t1","agent_status":"unknown","focused":false}}}
+{"event":"some.future_event","data":{"type":"some_future_event","experimental":true}}
+{"id":"sub_1","error":{"code":"events_lost","message":"event subscription fell behind retained history"}}
