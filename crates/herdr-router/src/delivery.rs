@@ -1,0 +1,1 @@
+//! Outbox delivery worker.

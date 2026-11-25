@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/herdr-protocol",
+    "crates/herdr-pool-core",
+    "crates/herdr-pool-store",
+    "crates/herdr-plugin",
+    "crates/herdr-router",
+    "bins/herdr-pool-cli",
+    "bins/herdr-routerd",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/quangdang46/herdr_cross_session_messaging"
+homepage = "https://github.com/quangdang46/herdr_cross_session_messaging"
+
+[workspace.dependencies]
+herdr-protocol = { path = "crates/herdr-protocol" }
+herdr-pool-core = { path = "crates/herdr-pool-core" }
+herdr-pool-store = { path = "crates/herdr-pool-store" }
+herdr-plugin = { path = "crates/herdr-plugin" }
+herdr-router = { path = "crates/herdr-router" }
+
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.2.3"
+thiserror = "2.0.21"
+anyhow = "1.0.105"
+clap = { version = "4.6.10", features = ["derive"] }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+time = { version = "0.3.55", features = ["serde", "macros", "formatting", "parsing"] }
+uuid = { version = "1.29.3", features = ["v7", "serde"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+sha2 = "0.10"

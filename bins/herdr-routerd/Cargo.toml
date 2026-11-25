@@ -1,0 +1,20 @@
+[package]
+name = "herdr-routerd"
+description = "Router daemon for herdr-cross-session-messaging"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "herdr-routerd"
+path = "src/main.rs"
+
+[dependencies]
+herdr-router.workspace = true
+herdr-plugin.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

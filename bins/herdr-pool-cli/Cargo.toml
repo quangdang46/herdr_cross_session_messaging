@@ -1,0 +1,25 @@
+[package]
+name = "herdr-pool-cli"
+description = "herdr-pool CLI: peer-to-peer messaging for coding agents inside Herdr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "herdr-pool"
+path = "src/main.rs"
+
+[dependencies]
+herdr-protocol.workspace = true
+herdr-pool-core.workspace = true
+herdr-pool-store.workspace = true
+herdr-plugin.workspace = true
+herdr-router.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

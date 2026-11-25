@@ -1,0 +1,18 @@
+[package]
+name = "herdr-pool-store"
+description = "SQLite storage for herdr-cross-session-messaging pools, messages, and agent registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+herdr-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rusqlite.workspace = true
+time.workspace = true
+uuid.workspace = true

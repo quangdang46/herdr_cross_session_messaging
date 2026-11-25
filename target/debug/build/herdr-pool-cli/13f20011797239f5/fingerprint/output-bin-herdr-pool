@@ -1,0 +1,1 @@
+{"$message_type":"unused_extern","lint_level":"force-warn","unused_extern_names":["herdr_plugin","herdr_pool_core","herdr_pool_store","herdr_protocol","herdr_router","serde","serde_json","tracing"]}
