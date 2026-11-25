@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/herdr-protocol",
+    "crates/herdr-testkit",
     "crates/herdr-pool-core",
     "crates/herdr-pool-store",
     "crates/herdr-plugin",
@@ -20,6 +21,7 @@ homepage = "https://github.com/quangdang46/herdr_cross_session_messaging"
 
 [workspace.dependencies]
 herdr-protocol = { path = "crates/herdr-protocol" }
+herdr-testkit = { path = "crates/herdr-testkit" }
 herdr-pool-core = { path = "crates/herdr-pool-core" }
 herdr-pool-store = { path = "crates/herdr-pool-store" }
 herdr-plugin = { path = "crates/herdr-plugin" }
@@ -37,3 +39,4 @@ uuid = { version = "1.29.3", features = ["v7", "serde"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 sha2 = "0.10"
+tempfile = "3"

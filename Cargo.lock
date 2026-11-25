@@ -401,6 +401,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "herdr-testkit"
+version = "0.1.0"
+dependencies = [
+ "herdr-protocol",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

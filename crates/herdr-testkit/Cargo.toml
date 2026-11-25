@@ -1,0 +1,16 @@
+[package]
+name = "herdr-testkit"
+description = "Fake Herdr server test harness: scriptable NDJSON unix-socket server for integration tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+herdr-protocol.workspace = true
