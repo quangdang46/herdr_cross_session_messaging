@@ -612,11 +612,15 @@ impl<'a> Bootstrapper<'a> {
         }
         self.attempts.insert(record.agent_id.clone(), used + 1);
 
-        // Target by terminal id (stable across pane.move); pane id fallback.
+        // Same target policy as the delivery worker: `agent.prompt`
+        // rejects terminal_id (agent_not_found), so pane_id is preferred,
+        // then name, terminal_id last.
         let target = record
-            .terminal_id
+            .pane_id
             .clone()
-            .or_else(|| record.pane_id.clone());
+            .filter(|p| !p.is_empty())
+            .or_else(|| record.name.clone().filter(|n| !n.is_empty()))
+            .or_else(|| record.terminal_id.clone().filter(|t| !t.is_empty()));
         let Some(target) = target else {
             tracing::debug!(agent = %record.agent_id, "bootstrap skipped: no target");
             return;
