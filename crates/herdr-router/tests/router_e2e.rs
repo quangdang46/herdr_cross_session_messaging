@@ -402,3 +402,55 @@ fn delivery_worker_blocked_backoff_is_recorded() {
     // 15s blocked backoff — a second immediate drain must not retry.
     assert_eq!(worker.drain_once().unwrap(), 0);
 }
+
+#[test]
+fn agent_scope_move_retires_stale_record() {
+    // Same terminal_id re-appearing under a different project cwd must not
+    // leave a live ghost record in the old scope's registry.
+    let server = FakeHerdr::start().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+
+    let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
+    let pools = Arc::new(Pools::open(state.path()).unwrap());
+    let mut sync = herdr_router::RegistrySync::new(&client, pools.as_ref());
+
+    // Bootstrap: agent lives in scope A.
+    server
+        .on("session.snapshot")
+        .respond(snapshot_result(vec![agent_json(dir_a.path(), "idle")]));
+    assert_eq!(sync.sync_snapshot().unwrap(), 1);
+
+    let live_in = |pools: &Pools| -> Vec<(String, String)> {
+        pools
+            .all()
+            .iter()
+            .flat_map(|p| {
+                p.registry()
+                    .list_agents(true)
+                    .unwrap()
+                    .into_iter()
+                    .map(move |a| (p.scope_key().to_string(), a.status))
+            })
+            .collect()
+    };
+    let before = live_in(&pools);
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].1, "idle");
+
+    // Reconcile: the same terminal now reports cwd B (terminal reused by
+    // another project). agent.get is not needed — reconcile upserts the
+    // AgentInfo directly.
+    server.on("agent.list").respond(json!({
+        "type": "agent_list",
+        "agents": [agent_json(dir_b.path(), "idle")],
+    }));
+    assert!(sync.reconcile().unwrap() >= 1);
+
+    let after = live_in(&pools);
+    assert_eq!(after.len(), 2, "expected records in both scopes: {after:?}");
+    let mut statuses: Vec<&str> = after.iter().map(|(_, s)| s.as_str()).collect();
+    statuses.sort_unstable();
+    assert_eq!(statuses, ["idle", "offline"], "records: {after:?}");
+}

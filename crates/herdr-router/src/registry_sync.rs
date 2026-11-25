@@ -481,6 +481,7 @@ impl<'a> RegistrySync<'a> {
         let resolved = self.resolve_agent_scope(agent)?;
         let pool = self.pools.for_resolved(&resolved)?;
         let record = self.merge_record(&pool, agent, &resolved)?;
+        self.retire_foreign_scope_records(agent, &pool);
         let registry = pool.registry();
         let is_new = registry.get_agent(&record.agent_id)?.is_none();
         registry.upsert_agent(&record)?;
@@ -496,6 +497,43 @@ impl<'a> RegistrySync<'a> {
         self.delivery_nudge = true;
         self.bootstrap.maybe_attempt(&pool, &record);
         Ok(())
+    }
+
+    /// An agent belongs to exactly one scope. When its resolved scope
+    /// differs from where its `terminal_id` was previously registered
+    /// (launch cwd changed, terminal reused by another project), retire
+    /// those records — otherwise the agent stays a live ghost peer in the
+    /// old scope forever (`mark_vanished_offline` diffs against the
+    /// *global* live set, which still contains this terminal).
+    fn retire_foreign_scope_records(&self, agent: &AgentInfo, pool: &Arc<PoolStore>) {
+        for other in self.pools.all() {
+            if other.scope_key() == pool.scope_key() {
+                continue;
+            }
+            let registry = other.registry();
+            let records = match registry.find_by_terminal(&agent.terminal_id) {
+                Ok(r) => r,
+                Err(err) => {
+                    tracing::debug!(scope = %other.scope_key(), error = %err, "find_by_terminal failed");
+                    continue;
+                }
+            };
+            for rec in records {
+                if rec.status == STATUS_OFFLINE {
+                    continue;
+                }
+                if let Err(err) = registry.mark_offline(&rec.agent_id) {
+                    tracing::debug!(agent = %rec.agent_id, error = %err, "cross-scope mark_offline failed");
+                } else {
+                    tracing::info!(
+                        agent = %rec.agent_id,
+                        from_scope = %other.scope_key(),
+                        to_scope = %pool.scope_key(),
+                        "agent moved scope; retired stale record"
+                    );
+                }
+            }
+        }
     }
 
     /// Resolve an agent's project scope, falling back to
