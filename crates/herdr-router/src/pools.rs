@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use herdr_pool_core::{ResolvedScope, ScopeKey};
 use herdr_pool_store::{PoolStore, ScopeIndex};
 
-use crate::error::{Result, RouterError};
+use crate::error::Result;
 
 /// Shared access to every open (or openable) per-scope pool database.
 ///
@@ -70,7 +70,9 @@ impl Pools {
             .register(scope_key, &canonical_path.to_string_lossy())?;
         let store = Arc::new(PoolStore::open(scope_key, &self.state_dir)?);
         let mut stores = self.stores.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(Arc::clone(stores.entry(scope_key.to_string()).or_insert(store)))
+        Ok(Arc::clone(
+            stores.entry(scope_key.to_string()).or_insert(store),
+        ))
     }
 
     /// All pools currently known: every scope key in `index.db` plus every
@@ -138,11 +140,4 @@ fn is_scope_key_dir(name: &str) -> bool {
 /// `ScopeKey` rather than a string.
 pub fn scope_key_of(resolved: &ResolvedScope) -> &ScopeKey {
     &resolved.scope_key
-}
-
-impl Pools {
-    /// Error helper kept for symmetry with other crates' Result aliases.
-    pub(crate) fn err(msg: impl Into<String>) -> RouterError {
-        RouterError::Daemon(msg.into())
-    }
 }

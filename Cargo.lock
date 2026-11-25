@@ -383,12 +383,13 @@ dependencies = [
  "herdr-pool-core",
  "herdr-pool-store",
  "herdr-protocol",
+ "herdr-testkit",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "time",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -399,6 +400,7 @@ dependencies = [
  "anyhow",
  "clap",
  "herdr-plugin",
+ "herdr-protocol",
  "herdr-router",
  "tracing",
  "tracing-subscriber",

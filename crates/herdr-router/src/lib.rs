@@ -1,3 +1,7 @@
+// No `unwrap()`/`expect()` in library code; inline `#[cfg(test)]` modules
+// opt out per-module, integration tests live in `tests/`.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 //! Router daemon library: event loop, registry sync, delivery worker.
 //!
 //! The daemon holds one long-lived `events.subscribe` connection to the

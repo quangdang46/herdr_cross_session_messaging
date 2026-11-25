@@ -159,9 +159,7 @@ impl Daemon {
             Some(path) => HerdrClient::from_socket_path(path),
             None => HerdrClient::new()?,
         };
-        let event_client = client
-            .clone()
-            .with_request_timeout(config.event_wakeup);
+        let event_client = client.clone().with_request_timeout(config.event_wakeup);
         Ok(Self {
             config,
             client,
@@ -174,32 +172,32 @@ impl Daemon {
 
     /// Spawn the event + delivery threads on an `Arc<Daemon>`; returns a
     /// handle. Threads are `'static` — the `Arc` keeps the daemon alive.
-    pub fn spawn(self: &Arc<Self>) -> DaemonHandle {
+    pub fn spawn(self: &Arc<Self>) -> Result<DaemonHandle> {
         let event_daemon = Arc::clone(self);
         let event = std::thread::Builder::new()
             .name("herdr-routerd-events".into())
             .spawn(move || event_daemon.event_loop())
-            .expect("spawn event thread");
+            .map_err(|e| RouterError::Daemon(format!("spawn event thread: {e}")))?;
         let delivery_daemon = Arc::clone(self);
         let delivery = std::thread::Builder::new()
             .name("herdr-routerd-delivery".into())
             .spawn(move || delivery_daemon.delivery_loop())
-            .expect("spawn delivery thread");
-        DaemonHandle {
+            .map_err(|e| RouterError::Daemon(format!("spawn delivery thread: {e}")))?;
+        Ok(DaemonHandle {
             shutdown: Arc::clone(&self.shutdown),
             notify: self.notify.clone(),
             state_dir: self.config.state_dir.clone(),
             event,
             delivery,
-        }
+        })
     }
 
     /// Blocking run: spawn scoped threads, return when both exit.
     /// Used by `herdr-routerd run` (foreground/debug).
     pub fn run(&self) -> Result<()> {
         std::thread::scope(|scope| {
-            scope.spawn(|| self.event_loop());
-            scope.spawn(|| self.delivery_loop());
+            let _event = scope.spawn(|| self.event_loop());
+            let _delivery = scope.spawn(|| self.delivery_loop());
         });
         Ok(())
     }
@@ -240,10 +238,15 @@ impl Daemon {
                 return;
             }
             match self.event_session(&mut sync) {
-                Ok(()) => {
-                    // Clean stream end or resubscribe cycle completed —
-                    // loop back and (re)subscribe.
-                    tracing::debug!("event loop: session ended; continuing");
+                Ok(SessionEnd::Shutdown) => {
+                    tracing::info!("event loop: shutdown requested; exiting");
+                    return;
+                }
+                Ok(SessionEnd::Resync) => {
+                    // Server closed the stream cleanly: resubscribe right
+                    // away — event_session re-snapshots first.
+                    tracing::info!("event loop: stream closed; resyncing");
+                    backoff = INITIAL_BACKOFF;
                     continue;
                 }
                 Err(err) => {
@@ -258,46 +261,56 @@ impl Daemon {
             let (lock, cvar) = &*pair;
             let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
             let _ = cvar.wait_timeout(guard, backoff);
-            drop(guard);
             backoff = (backoff * 2).min(MAX_CONNECT_BACKOFF);
         }
     }
 
-    /// One subscribe session: snapshot sync → subscribe → frame loop.
+    /// One subscribe session: snapshot sync once, then subscribe → frame
+    /// loop. Re-subscribes in place when the watched-pane set changes
+    /// (no re-snapshot needed — the registry is already current).
     ///
-    /// `Ok(())` means "re-subscribe immediately" (watched-pane set changed
-    /// or shutdown requested); `Err` means transport/protocol failure —
-    /// the caller backs off, then calls again, which re-snapshots
-    /// (Resync → re-snapshot, since events are not replayable).
-    fn event_session(&self, sync: &mut RegistrySync<'_>) -> Result<()> {
+    /// * `Ok(SessionEnd::Resync)` — server closed the stream; caller
+    ///   re-enters [`Self::event_session`] which re-snapshots (events are
+    ///   not replayable).
+    /// * `Ok(SessionEnd::Shutdown)` — stop requested.
+    /// * `Err` — transport/protocol failure; caller backs off, then
+    ///   re-enters (which re-snapshots).
+    fn event_session(&self, sync: &mut RegistrySync<'_>) -> Result<SessionEnd> {
         // Bootstrap/resync: refresh the whole registry from the snapshot
-        // before (re)subscribing so no events are missed.
+        // before subscribing so no events are missed.
         let synced = sync.sync_snapshot()?;
         tracing::info!(agents = synced, "event loop: snapshot synced");
+        sync.acknowledge_subscriptions();
 
         let mut last_reconcile = Instant::now();
         loop {
             if self.should_stop() {
-                return Ok(());
+                return Ok(SessionEnd::Shutdown);
             }
             let subs = subscriptions_for(sync.watched_panes());
+            let sub_count = subs.len();
             let mut stream = self.event_client.events_subscribe(subs)?;
             sync.acknowledge_subscriptions();
-            tracing::debug!(count = subs.len(), "event loop: subscribed");
+            tracing::debug!(count = sub_count, "event loop: subscribed");
 
             loop {
                 if self.should_stop() {
-                    return Ok(());
+                    return Ok(SessionEnd::Shutdown);
                 }
                 match stream.next_frame() {
                     Ok(frame) => {
                         self.dispatch_frame(sync, &frame);
                         if sync.subscriptions_changed() {
                             // Pane set changed: drop this stream and
-                            // re-issue events.subscribe with the new set.
+                            // re-issue events.subscribe with the new set —
+                            // same session, no re-snapshot.
                             tracing::debug!("event loop: watched panes changed; resubscribing");
-                            return Ok(());
+                            break;
                         }
+                    }
+                    Err(HerdrError::Closed) => {
+                        // Clean EOF: the server went away; resync.
+                        return Ok(SessionEnd::Resync);
                     }
                     Err(HerdrError::Transport(e))
                         if matches!(
@@ -307,7 +320,7 @@ impl Daemon {
                     {
                         // Read-timeout wakeup: reconcile timer + stop check.
                         if self.should_stop() {
-                            return Ok(());
+                            return Ok(SessionEnd::Shutdown);
                         }
                         if last_reconcile.elapsed() >= self.config.reconcile_interval {
                             match sync.reconcile() {
@@ -359,6 +372,15 @@ impl Daemon {
     }
 }
 
+/// How a subscribe session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionEnd {
+    /// Stop requested — exit the event loop.
+    Shutdown,
+    /// Server closed the stream — re-snapshot and resubscribe immediately.
+    Resync,
+}
+
 fn frame_kind(frame: &SubscriptionFrame) -> &'static str {
     match frame {
         SubscriptionFrame::Event(env) => env.event.dot_name().unwrap_or("unknown"),
@@ -406,10 +428,7 @@ impl InstanceGuard {
             match std::fs::create_dir(&lock_dir) {
                 Ok(()) => {
                     std::fs::write(lock_dir.join("pid"), pid.to_string())?;
-                    return Ok(Self {
-                        lock_dir,
-                        pid,
-                    });
+                    return Ok(Self { lock_dir, pid });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     match read_lock_pid(&lock_dir) {

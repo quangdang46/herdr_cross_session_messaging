@@ -60,6 +60,7 @@ pub fn subscriptions_for(watched_panes: &BTreeSet<String>) -> Vec<Subscription> 
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -67,7 +68,12 @@ mod tests {
     fn static_set_covers_registry_relevant_lifecycle() {
         let names: Vec<String> = static_subscriptions()
             .iter()
-            .map(|s| serde_json::to_value(s).unwrap()["type"].as_str().unwrap().to_string())
+            .map(|s| {
+                serde_json::to_value(s).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
             .collect();
         for expected in [
             "pane.agent_detected",
@@ -99,7 +105,11 @@ mod tests {
             .collect();
         assert_eq!(status_subs.len(), 2);
         for s in status_subs {
-            if let Subscription::PaneAgentStatusChanged { pane_id, agent_status } = s {
+            if let Subscription::PaneAgentStatusChanged {
+                pane_id,
+                agent_status,
+            } = s
+            {
                 assert!(watched.contains(pane_id));
                 assert!(agent_status.is_none());
             }

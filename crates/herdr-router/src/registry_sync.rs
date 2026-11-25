@@ -41,7 +41,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use herdr_pool_core::{resolve_scope_for_agent, ResolvedScope};
 use herdr_pool_store::{new_agent_id, AgentRecord, PoolStore, STATUS_OFFLINE};
 use herdr_protocol::{
-    AgentInfo, AgentStatus, EventData, HerdrClient, PaneInfo, SubscriptionEventData, SubscriptionFrame,
+    AgentInfo, AgentStatus, EventData, HerdrClient, PaneInfo, SubscriptionEventData,
+    SubscriptionFrame,
 };
 
 use crate::envelope::{bootstrap_text, BOOTSTRAP_VERSION};
@@ -258,18 +259,29 @@ impl<'a> RegistrySync<'a> {
 
     /// Dispatch one subscription frame. Returns the outcome for the event
     /// loop (delivery nudge / resubscribe bookkeeping happens inside).
+    ///
+    /// Any non-quiet outcome may have changed the watched-pane set, so
+    /// [`Self::refresh_watched`] runs before returning — `subs_dirty` then
+    /// tells the event loop to re-issue `events.subscribe`.
     pub fn handle_frame(&mut self, frame: &SubscriptionFrame) -> Result<SyncOutcome> {
-        match frame {
-            SubscriptionFrame::Event(envelope) => self.handle_event(envelope.event, &envelope.data),
+        let outcome = match frame {
+            SubscriptionFrame::Event(envelope) => {
+                self.handle_event(envelope.event, &envelope.data)?
+            }
             SubscriptionFrame::SubscriptionEvent(env) => {
                 if let SubscriptionEventData::PaneAgentStatusChanged(ev) = &env.data {
                     self.handle_status_change(&ev.pane_id, ev.agent_status)?;
-                    return Ok(SyncOutcome::RegistryChanged);
+                    SyncOutcome::RegistryChanged
+                } else {
+                    // output_matched / scroll_changed / unknown: not subscribed.
+                    SyncOutcome::Quiet
                 }
-                // output_matched / scroll_changed / unknown: not subscribed.
-                Ok(SyncOutcome::Quiet)
             }
+        };
+        if outcome != SyncOutcome::Quiet {
+            self.refresh_watched();
         }
+        Ok(outcome)
     }
 
     fn handle_event(
@@ -279,7 +291,12 @@ impl<'a> RegistrySync<'a> {
     ) -> Result<SyncOutcome> {
         use herdr_protocol::EventKind as K;
         match (kind, data) {
-            (K::PaneAgentDetected, EventData::PaneAgentDetected { pane_id, released, .. }) => {
+            (
+                K::PaneAgentDetected,
+                EventData::PaneAgentDetected {
+                    pane_id, released, ..
+                },
+            ) => {
                 if *released {
                     self.mark_offline_pane(pane_id);
                     Ok(SyncOutcome::RegistryChanged)
@@ -487,13 +504,12 @@ impl<'a> RegistrySync<'a> {
         match resolve_scope_for_agent(agent, None) {
             Ok(scope) => Ok(scope),
             Err(core_err) => {
-                if !matches!(
-                    core_err,
-                    herdr_pool_core::CoreError::ScopeUnresolved(_)
-                ) {
+                if !matches!(core_err, herdr_pool_core::CoreError::ScopeUnresolved(_)) {
                     return Err(core_err.into());
                 }
-                let process_info = self.client.pane_process_info(Some(&agent.pane_id))?;
+                let process_info = self
+                    .client
+                    .pane_process_info(Some(agent.pane_id.as_str()))?;
                 resolve_scope_for_agent(agent, Some(&process_info)).map_err(Into::into)
             }
         }
@@ -509,15 +525,13 @@ impl<'a> RegistrySync<'a> {
         resolved: &ResolvedScope,
     ) -> Result<AgentRecord> {
         let registry = pool.registry();
-        let existing = registry
-            .get_by_terminal(&agent.terminal_id)?
-            .or_else(|| {
-                registry
-                    .find_by_pane(&agent.pane_id)
-                    .ok()?
-                    .into_iter()
-                    .find(|r| r.status != STATUS_OFFLINE)
-            });
+        let existing = registry.get_by_terminal(&agent.terminal_id)?.or_else(|| {
+            registry
+                .find_by_pane(&agent.pane_id)
+                .ok()?
+                .into_iter()
+                .find(|r| r.status != STATUS_OFFLINE)
+        });
 
         let now = now_millis();
         Ok(AgentRecord {
@@ -638,4 +652,3 @@ fn mark_bootstrapped(pool: &Arc<PoolStore>, record: &AgentRecord) -> Result<()> 
     pool.registry().upsert_agent(&updated)?;
     Ok(())
 }
-

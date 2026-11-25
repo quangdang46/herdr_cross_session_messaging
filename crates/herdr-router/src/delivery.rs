@@ -150,12 +150,7 @@ impl DeliveryWorker {
     }
 
     /// Deliver one message: resolve recipient → prompt → record outcome.
-    fn deliver(
-        &self,
-        pool: &PoolStore,
-        messages: &MessageStore<'_>,
-        msg: &Message,
-    ) -> Result<()> {
+    fn deliver(&self, pool: &PoolStore, messages: &MessageStore<'_>, msg: &Message) -> Result<()> {
         let registry = pool.registry();
         let recipient = match registry.get_agent(&msg.to_agent)? {
             Some(recipient) => recipient,
@@ -257,11 +252,7 @@ impl DeliveryWorker {
     /// the offline-too-long path). `record_failure` is the only transition
     /// into `dead`, so call it until it reports `Dead` — bounded by
     /// `MAX_DELIVERY_ATTEMPTS`.
-    fn dead_letter(
-        &self,
-        messages: &MessageStore<'_>,
-        msg: &Message,
-    ) -> Result<()> {
+    fn dead_letter(&self, messages: &MessageStore<'_>, msg: &Message) -> Result<()> {
         for _ in 0..16 {
             match messages.record_failure(&msg.id, None)? {
                 MessageStatus::Dead => return Ok(()),
@@ -300,6 +291,7 @@ impl DeliveryWorker {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

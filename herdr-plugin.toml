@@ -1,0 +1,15 @@
+id = "herdr.cross-session-messaging"
+name = "Cross-Session Messaging"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Peer-to-peer messaging layer for coding agents in Herdr (project-scoped pools, herdr-pool CLI, agent skills)."
+platforms = ["linux", "macos", "windows"]
+
+[[startup]]
+command = ["herdr-routerd", "start"]
+
+[[actions]]
+id = "open-inbox"
+title = "Messaging inbox"
+contexts = ["workspace"]
+command = ["herdr-pool", "inbox"]
