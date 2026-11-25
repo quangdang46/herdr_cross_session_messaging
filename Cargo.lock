@@ -327,8 +327,11 @@ dependencies = [
  "herdr-pool-store",
  "herdr-protocol",
  "herdr-router",
+ "herdr-testkit",
  "serde",
  "serde_json",
+ "tempfile",
+ "time",
  "tracing",
  "tracing-subscriber",
 ]
