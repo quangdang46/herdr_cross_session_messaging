@@ -17,7 +17,6 @@ edition = "2021"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/quangdang46/herdr_cross_session_messaging"
-homepage = "https://github.com/quangdang46/herdr_cross_session_messaging"
 
 [workspace.dependencies]
 herdr-protocol = { path = "crates/herdr-protocol", version = "0.1.0" }

@@ -308,7 +308,6 @@ name = "herdr-plugin"
 version = "0.1.0"
 dependencies = [
  "serde",
- "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
@@ -355,10 +354,7 @@ dependencies = [
 name = "herdr-pool-store"
 version = "0.1.0"
 dependencies = [
- "herdr-protocol",
  "rusqlite",
- "serde",
- "serde_json",
  "tempfile",
  "thiserror",
  "time",
