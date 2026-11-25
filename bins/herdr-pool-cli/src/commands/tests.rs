@@ -231,19 +231,16 @@ fn send_blocked_agent_leaves_retry_scheduled() {
 
     let pool = open_pool(f.state.path(), f.project.path()).unwrap();
     let peer_id = peer_agent_id(&pool);
-    // `failed` rows are excluded from `inbox`; read via the thread instead.
-    let threads = pool.pool.messages().threads().unwrap();
-    let msgs = pool
-        .pool
-        .messages()
-        .thread_messages(&threads[0].thread_id)
-        .unwrap();
-    assert_eq!(msgs.len(), 1);
-    // Store records the failed attempt + next_retry_at for the daemon.
-    assert_eq!(msgs[0].status, herdr_pool_store::MessageStatus::Failed);
-    assert!(msgs[0].next_retry_at.is_some());
-    assert_eq!(msgs[0].attempt_count, 1);
-    assert_eq!(msgs[0].to_agent, peer_id);
+    // Deferred (still `pending`) rows ARE visible in the inbox — the
+    // recipient can read mail the daemon has not prompted yet.
+    let inbox = pool.pool.messages().inbox(&peer_id, false).unwrap();
+    assert_eq!(inbox.len(), 1);
+    // Store records the defer schedule for the daemon without consuming
+    // a delivery attempt.
+    assert_eq!(inbox[0].status, herdr_pool_store::MessageStatus::Pending);
+    assert!(inbox[0].next_retry_at.is_some());
+    assert_eq!(inbox[0].attempt_count, 0);
+    assert_eq!(inbox[0].to_agent, peer_id);
 }
 
 #[test]

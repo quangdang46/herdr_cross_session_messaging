@@ -37,25 +37,47 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, target: &str, text: &str) -> CmdResul
     let messages = pool.pool.messages();
 
     // Dispatch on id shape first (`msg_`/`th_` prefixes are stable), then
-    // fall back to lookup so callers can paste bare ids.
-    let msg = if target.starts_with("th_") {
-        reply_in_thread(&messages, &self_record.agent_id, target, text)?
+    // fall back to lookup so callers can paste bare ids. `ack_id` is the
+    // original message being replied to — replying implies it was read.
+    let (msg, ack_id) = if target.starts_with("th_") {
+        (
+            reply_in_thread(&messages, &self_record.agent_id, target, text)?,
+            None,
+        )
     } else if target.starts_with("msg_") {
         match messages.message(target)? {
-            Some(_) => messages.reply(target, &self_record.agent_id, text)?,
+            Some(_) => (
+                messages.reply(target, &self_record.agent_id, text)?,
+                Some(target.to_string()),
+            ),
             None => {
                 return Err(Failure::usage(format!("message '{target}' not found")));
             }
         }
     } else if is_thread(&messages, target)? {
-        reply_in_thread(&messages, &self_record.agent_id, target, text)?
+        (
+            reply_in_thread(&messages, &self_record.agent_id, target, text)?,
+            None,
+        )
     } else if messages.message(target)?.is_some() {
-        messages.reply(target, &self_record.agent_id, text)?
+        (
+            messages.reply(target, &self_record.agent_id, text)?,
+            Some(target.to_string()),
+        )
     } else {
         return Err(Failure::usage(format!(
             "'{target}' is neither a known message nor thread"
         )));
     };
+
+    // A reply consumes the original: acknowledge it so it leaves the
+    // unread inbox and a still-pending original is never prompted again.
+    // Best-effort — already-acknowledged or dead originals are fine.
+    if let Some(id) = &ack_id {
+        if let Err(err) = messages.mark_acknowledged(id) {
+            tracing::debug!(message = %id, error = %err, "reply: original ack skipped");
+        }
+    }
 
     // `deliver` resolves the recipient record and reports a clear error
     // when it is missing from the registry.

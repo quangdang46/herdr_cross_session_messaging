@@ -14,11 +14,14 @@
 //!    |       consumed; cancels      |
 //!    |       pending delivery)      |
 //!    | record_failure              |
+//!    | defer (agent_blocked:       |
+//!    |  reschedule, no attempt)    |
 //!    v                            |
 //!  failed --record_failure--> failed (until MAX_DELIVERY_ATTEMPTS) -> dead
 //!    |                            |
-//!    +--- retry() ----> pending <-+   (failed|dead only; delivered/acknowledged
-//!                                    can never go back to pending)
+//!    +--- retry() ----> pending <-+   (failed|dead|pending-deferred only;
+//!                                    delivered/acknowledged can never go
+//!                                    back to pending)
 //! ```
 //!
 //! `failed` rows carry `next_retry_at` and are picked up again by
@@ -558,8 +561,32 @@ impl<'a> MessageStore<'a> {
         Ok(new_status)
     }
 
-    /// failed|dead -> pending. The explicit retry path: clears the failure
-    /// schedule so the next `outbox_due` sweep picks the message up.
+    /// pending|failed -> same status with a new `next_retry_at`, WITHOUT
+    /// incrementing `attempt_count` or risking dead-letter.
+    ///
+    /// Used for `agent_blocked`: the recipient is alive but busy — a
+    /// delivery deferral, not a failure — so it must not consume the
+    /// [`MAX_DELIVERY_ATTEMPTS`] budget.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
+    pub fn defer(&self, id: &str, next_retry_at: Option<i64>) -> Result<()> {
+        self.transition(
+            id,
+            &[MessageStatus::Pending, MessageStatus::Failed],
+            "deferred",
+            |tx, _now| {
+                tx.execute(
+                    "UPDATE messages SET next_retry_at = ?1 WHERE id = ?2",
+                    params![next_retry_at, id],
+                )?;
+                Ok(())
+            },
+        )
+    }
+
+    /// failed|dead|pending -> pending. The explicit retry path: clears the
+    /// failure/defer schedule so the next `outbox_due` sweep picks the
+    /// message up. On an already-`pending` row this is a no-op status-wise —
+    /// it just clears `next_retry_at` ("deliver now").
     ///
     /// `delivered` and `acknowledged` messages can never return to `pending`
     /// (that would risk duplicate delivery of already-read mail).
@@ -567,7 +594,11 @@ impl<'a> MessageStore<'a> {
     pub fn retry(&self, id: &str) -> Result<()> {
         self.transition(
             id,
-            &[MessageStatus::Failed, MessageStatus::Dead],
+            &[
+                MessageStatus::Failed,
+                MessageStatus::Dead,
+                MessageStatus::Pending,
+            ],
             "pending",
             |tx, _now| {
                 tx.execute(

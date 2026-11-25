@@ -299,7 +299,7 @@ fn send_json_delivers_and_records_prompt() {
 }
 
 #[test]
-fn send_blocked_exits_0_with_failed_status() {
+fn send_blocked_exits_0_with_deferred_status() {
     let f = Fx::new();
     f.seed_running_daemon();
     script_two_agents(&f);
@@ -307,7 +307,9 @@ fn send_blocked_exits_0_with_failed_status() {
     let env = f.env("w1:p1");
     let out = f.run(&env, &["--json", "send", "peer", "hi"]);
     let v = Fx::stdout_json(&out);
-    assert_eq!(v["message"]["status"], "failed");
+    // agent_blocked defers without consuming an attempt: the message
+    // stays pending with a retry schedule for the daemon.
+    assert_eq!(v["message"]["status"], "pending");
     assert!(v["message"]["next_retry_at"].is_i64());
 }
 
