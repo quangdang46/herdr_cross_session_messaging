@@ -30,6 +30,18 @@ impl Fx {
         }
     }
 
+    /// Fake a *running* router daemon (pidfile + instance lock naming this
+    /// live test process) so `ensure_daemon` inside `send`/`reply`
+    /// short-circuits instead of spawning a real `herdr-routerd` — whose
+    /// `start` banner would pollute the CLI's captured stdout and whose
+    /// `run` child could connect to a real Herdr socket.
+    fn seed_running_daemon(&self) {
+        let pid = std::process::id().to_string();
+        std::fs::write(self.state.path().join("routerd.pid"), format!("{pid}\n0\n")).unwrap();
+        std::fs::create_dir(self.state.path().join("routerd.lock")).unwrap();
+        std::fs::write(self.state.path().join("routerd.lock").join("pid"), &pid).unwrap();
+    }
+
     fn project_cwd(&self) -> String {
         std::fs::canonicalize(self.project.path())
             .unwrap()
@@ -267,6 +279,7 @@ fn peers_json_lists_peer() {
 #[test]
 fn send_json_delivers_and_records_prompt() {
     let f = Fx::new();
+    f.seed_running_daemon();
     script_two_agents(&f);
     let env = f.env("w1:p1");
     let out = f.run(&env, &["--json", "send", "peer", "review please"]);
@@ -286,6 +299,7 @@ fn send_json_delivers_and_records_prompt() {
 #[test]
 fn send_blocked_exits_0_with_failed_status() {
     let f = Fx::new();
+    f.seed_running_daemon();
     script_two_agents(&f);
     f.server.fail_next("agent.prompt", "agent_blocked", "busy");
     let env = f.env("w1:p1");
@@ -298,6 +312,7 @@ fn send_blocked_exits_0_with_failed_status() {
 #[test]
 fn send_unknown_peer_exits_2_json_error() {
     let f = Fx::new();
+    f.seed_running_daemon();
     script_two_agents(&f);
     let env = f.env("w1:p1");
     let out = f.run(&env, &["--json", "send", "ghost", "hi"]);
@@ -309,6 +324,7 @@ fn send_unknown_peer_exits_2_json_error() {
 #[test]
 fn inbox_and_message_get_json() {
     let f = Fx::new();
+    f.seed_running_daemon();
     script_two_agents(&f);
     let env = f.env("w1:p1");
 
@@ -412,6 +428,7 @@ fn install_then_uninstall_project_scope() {
 #[test]
 fn cross_scope_isolation_end_to_end() {
     let f = Fx::new();
+    f.seed_running_daemon();
     // Self in project A; the only other agent lives in project B.
     let cwd_a = f.project_cwd();
     let other = TempDir::new().unwrap();
