@@ -11,7 +11,7 @@
 //! | `agent.prompt` outcome | action |
 //! |---|---|
 //! | success | `mark_delivered` |
-//! | `agent_blocked` | `defer(now + 15s)` — harness queues nothing; retry shortly, no attempt consumed |
+//! | `agent_blocked` | `defer(now + 15s)` — harness queues nothing; retry shortly, no attempt consumed; throttled pane snapshot + `notification.show` rescue notice |
 //! | `agent_not_ready` / `agent_not_found` / `agent_target_ambiguous` / stalled | `record_failure(now + backoff(attempts))` |
 //! | transport/timeout/other | `record_failure(now + backoff(attempts))` |
 //! | recipient offline > [`OFFLINE_DEAD_AFTER`] | dead-letter immediately + throttled `notification.show` |
@@ -23,7 +23,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use herdr_pool_store::{Message, MessageStatus, MessageStore, PoolStore, STATUS_OFFLINE};
-use herdr_protocol::{HerdrClient, HerdrError, NotificationShowParams};
+use herdr_protocol::{
+    AgentReadParams, HerdrClient, HerdrError, NotificationShowParams, ReadOptions, ReadSource,
+};
 
 use crate::envelope::message_envelope;
 use crate::error::Result;
@@ -42,6 +44,10 @@ pub const BLOCKED_BACKOFF: Duration = Duration::from_secs(15);
 pub const OFFLINE_DEAD_AFTER: Duration = Duration::from_secs(5 * 60);
 /// Minimum interval between dead-letter `notification.show` toasts.
 pub const DEAD_NOTIFY_INTERVAL: Duration = Duration::from_secs(60);
+/// Minimum interval between blocked-agent rescue notices per recipient.
+pub const BLOCKED_NOTIFY_INTERVAL: Duration = Duration::from_secs(120);
+/// Lines of pane output captured for the blocked-agent snapshot.
+pub const BLOCKED_SNAPSHOT_LINES: u32 = 30;
 /// How often the worker sweeps the outbox when idle.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -82,6 +88,8 @@ pub struct DeliveryWorker {
     poll_interval: Duration,
     /// Last time a dead-letter notification was shown (throttle).
     last_dead_notify: std::cell::Cell<Option<std::time::Instant>>,
+    /// Last rescue notice per recipient agent_id (throttle).
+    last_blocked_notify: std::cell::RefCell<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 impl DeliveryWorker {
@@ -99,6 +107,7 @@ impl DeliveryWorker {
             notify,
             poll_interval,
             last_dead_notify: std::cell::Cell::new(None),
+            last_blocked_notify: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 
@@ -194,6 +203,7 @@ impl DeliveryWorker {
                 // failure, and dead-lettering busy agents' mail would lose
                 // it invisibly (dead rows never reach the inbox).
                 self.defer_retry(messages, msg, BLOCKED_BACKOFF)?;
+                self.maybe_rescue_blocked(&recipient, &target);
             }
             Err(err) => {
                 let delay = if err.is_agent_not_found()
@@ -282,6 +292,58 @@ impl DeliveryWorker {
             }
         }
         Ok(())
+    }
+
+    /// Rescue notice for a blocked recipient, throttled per agent: capture a
+    /// pane snapshot into the daemon log and toast the user that mail is
+    /// queued behind the block. Best-effort — failures only log.
+    fn maybe_rescue_blocked(&self, recipient: &herdr_pool_store::AgentRecord, target: &str) {
+        let now = std::time::Instant::now();
+        {
+            let mut last = self.last_blocked_notify.borrow_mut();
+            if last
+                .get(&recipient.agent_id)
+                .is_some_and(|t| now.duration_since(*t) < BLOCKED_NOTIFY_INTERVAL)
+            {
+                return;
+            }
+            last.insert(recipient.agent_id.clone(), now);
+        }
+
+        let waiting = recipient
+            .name
+            .clone()
+            .unwrap_or_else(|| recipient.agent_id.clone());
+        if let Ok(snapshot) = self.client.agent_read(&AgentReadParams {
+            target: target.to_string(),
+            source: ReadSource::Recent,
+            options: ReadOptions {
+                lines: Some(BLOCKED_SNAPSHOT_LINES),
+                ..ReadOptions::default()
+            },
+        }) {
+            let tail: Vec<&str> = snapshot.text.lines().rev().take(10).collect();
+            tracing::warn!(
+                agent = %recipient.agent_id,
+                pane = %snapshot.pane_id,
+                "agent blocked with queued mail; pane snapshot tail:\n{}",
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            );
+        }
+
+        let title = format!("herdr-pool: agent {waiting} is blocked");
+        let body = format!(
+            "{} — messages are queued and will deliver when it unblocks",
+            recipient.agent_id
+        );
+        if let Err(err) = self.client.notification_show(&NotificationShowParams {
+            title,
+            body: Some(body),
+            position: None,
+            sound: None,
+        }) {
+            tracing::debug!(error = %err, "blocked-agent notification failed");
+        }
     }
 
     /// Throttled `notification.show` for dead-lettered mail.
