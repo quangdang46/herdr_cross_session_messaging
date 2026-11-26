@@ -32,7 +32,9 @@ All notable changes to this project are documented here. The format follows
   still defers without consuming attempts and shows the throttled blocked
   toast as before. Jobs record `captured_at` (snapshot freshness),
   reservations taken earlier in the same sweep exclude later picks (parallel
-  rescues get distinct helpers), and `assigned` rows stale past
+  rescues get distinct helpers), helpers whose dispatch prompt was rejected
+  are excluded from re-picks for that job (R8 — no retrying a helper that
+  just went blocked), and `assigned` rows stale past
   `RESCUE_ASSIGNED_STALE` (60s — the crash window between reserve and
   prompt) return to `pending` for redispatch.
 - `herdr-pool rescue <rs-id> done|needs-human` — the assigned helper reports
