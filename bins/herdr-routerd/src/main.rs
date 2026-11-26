@@ -11,9 +11,10 @@
 //!   hook / manual diagnostic; no daemon required).
 //! * `run` — foreground daemon loop (what `start` detaches into).
 //!
-//! State dir resolution is shared with the plugin: `HERDR_PLUGIN_STATE_DIR`
-//! → `HERDR_POOL_STATE_DIR` → XDG → `~/.local/state/herdr-pool` (see
-//! `herdr_plugin::paths::state_dir`). The Herdr socket comes from the
+//! State dir resolution is shared with the plugin: `HERDR_POOL_STATE_DIR`
+//! → XDG → `~/.local/state/herdr-cross-session-messaging` (see
+//! `herdr_plugin::paths::state_dir`). `HERDR_PLUGIN_STATE_DIR` is ignored so
+//! plugin and agent processes share one pool. The Herdr socket comes from the
 //! environment (`HERDR_SOCKET_PATH` / `HERDR_SESSION` / XDG config).
 
 use std::fs::OpenOptions;

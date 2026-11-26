@@ -191,8 +191,8 @@ cwd — but `whoami`/`peers` metadata is thinner.
 | `herdr-routerd tick` | One-shot `session.snapshot` + registry reconcile (used by plugin `[[events]]` hooks). |
 | `herdr-routerd run` | Foreground event loop (what `start` detaches into). |
 
-State dir resolution: `HERDR_PLUGIN_STATE_DIR` → `HERDR_POOL_STATE_DIR` → XDG
-state → `~/.local/state/herdr-pool`. Single-instance enforced by lockfile.
+State dir resolution: `HERDR_POOL_STATE_DIR` → XDG
+state → `~/.local/state/herdr-cross-session-messaging`. Single-instance enforced by lockfile.
 
 ### `herdr-pool` — agent-facing CLI
 
@@ -271,8 +271,8 @@ in the pool.
 
 ## Configuration & state
 
-- **State dir resolution** (highest wins): `HERDR_PLUGIN_STATE_DIR` →
-  `HERDR_POOL_STATE_DIR` → XDG state dir → `~/.local/state/herdr-pool`.
+- **State dir resolution** (highest wins): `HERDR_POOL_STATE_DIR` →
+  XDG state dir → `~/.local/state/herdr-cross-session-messaging`.
 - **Per-scope pools**: `<state>/pools/<scope_key>/pool.db` (SQLite) — one
   pool per canonical project directory.
 - **Daemon runtime**: pidfile/lock + logs under `<state>/`;
@@ -366,7 +366,7 @@ The message stays `pending`; the daemon retries with backoff and delivers once
 the peer reports `idle`/`working`. After max attempts it dead-letters.
 
 **Is my data sent anywhere?**
-No. Everything is local: SQLite under the plugin state dir, Unix socket to the
+No. Everything is local: SQLite under the pool state dir, Unix socket to the
 local Herdr server. No network egress.
 
 **How do agents learn about this?**

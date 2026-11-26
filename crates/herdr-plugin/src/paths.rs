@@ -6,12 +6,15 @@
 //! [`state_dir`]/[`config_dir`] wrappers read the real process environment.
 //!
 //! State dir resolution order:
-//! 1. `HERDR_PLUGIN_STATE_DIR` (injected by Herdr for plugin commands)
-//! 2. `HERDR_POOL_STATE_DIR` (explicit user override)
-//! 3. `$XDG_STATE_HOME/herdr-cross-session-messaging`
-//! 4. `$HOME/.local/state/herdr-cross-session-messaging`
-//! 5. `<home>/.herdr-cross-session-messaging` when `$HOME` is unset but a home
+//! 1. `HERDR_POOL_STATE_DIR` (explicit user override)
+//! 2. `$XDG_STATE_HOME/herdr-cross-session-messaging`
+//! 3. `$HOME/.local/state/herdr-cross-session-messaging`
+//! 4. `<home>/.herdr-cross-session-messaging` when `$HOME` is unset but a home
 //!    directory is known (passwd fallback) — the "no home env" fallback.
+//!
+//! `HERDR_PLUGIN_STATE_DIR` is deliberately NOT consulted: pool state must be
+//! shared between the plugin daemon and agent CLIs, and agent panes never
+//! receive plugin env vars. Consulting it would split the pool in two.
 //!
 //! Config dir resolution mirrors this with `HERDR_PLUGIN_CONFIG_DIR`,
 //! `HERDR_POOL_CONFIG_DIR`, `$XDG_CONFIG_HOME`, `$HOME/.config`, and
@@ -47,7 +50,7 @@ pub fn state_dir_from(env: &EnvLookup<'_>, home_fallback: Option<&Path>) -> Resu
     resolve(
         env,
         home_fallback,
-        &[ENV_PLUGIN_STATE_DIR, ENV_POOL_STATE_DIR],
+        &[ENV_POOL_STATE_DIR],
         ENV_XDG_STATE_HOME,
         XdgKind::State,
     )
@@ -169,19 +172,9 @@ mod tests {
     }
 
     #[test]
-    fn plugin_state_dir_env_wins() {
+    fn pool_state_dir_env_wins() {
         let e = env(&[
             ("HERDR_PLUGIN_STATE_DIR", "/p/state"),
-            ("HERDR_POOL_STATE_DIR", "/pool/state"),
-            ("XDG_STATE_HOME", "/xdg"),
-            ("HOME", "/home/u"),
-        ]);
-        assert_eq!(state_dir_from(&e, None).unwrap(), PathBuf::from("/p/state"));
-    }
-
-    #[test]
-    fn pool_state_dir_env_second() {
-        let e = env(&[
             ("HERDR_POOL_STATE_DIR", "/pool/state"),
             ("XDG_STATE_HOME", "/xdg"),
             ("HOME", "/home/u"),
@@ -189,6 +182,21 @@ mod tests {
         assert_eq!(
             state_dir_from(&e, None).unwrap(),
             PathBuf::from("/pool/state")
+        );
+    }
+
+    #[test]
+    fn plugin_state_dir_env_is_ignored() {
+        // Agent panes never see HERDR_PLUGIN_STATE_DIR, so pool state must not
+        // depend on it — otherwise plugin and agent processes split the pool.
+        let e = env(&[
+            ("HERDR_PLUGIN_STATE_DIR", "/p/state"),
+            ("XDG_STATE_HOME", "/xdg"),
+            ("HOME", "/home/u"),
+        ]);
+        assert_eq!(
+            state_dir_from(&e, None).unwrap(),
+            PathBuf::from("/xdg/herdr-cross-session-messaging")
         );
     }
 
@@ -231,11 +239,7 @@ mod tests {
 
     #[test]
     fn empty_env_values_are_ignored() {
-        let e = env(&[
-            ("HERDR_PLUGIN_STATE_DIR", ""),
-            ("XDG_STATE_HOME", ""),
-            ("HOME", "/home/u"),
-        ]);
+        let e = env(&[("XDG_STATE_HOME", ""), ("HOME", "/home/u")]);
         assert_eq!(
             state_dir_from(&e, None).unwrap(),
             PathBuf::from("/home/u/.local/state/herdr-cross-session-messaging")

@@ -102,8 +102,8 @@ impl DaemonConfig {
         }
     }
 
-    /// Config from the process environment (`HERDR_PLUGIN_STATE_DIR` →
-    /// `HERDR_POOL_STATE_DIR` → XDG → home), socket from env.
+    /// Config from the process environment (`HERDR_POOL_STATE_DIR` →
+    /// XDG → home), socket from env.
     pub fn from_env() -> Result<Self> {
         let mut config = Self::for_state_dir(plugin_state_dir()?);
         config.notify_on_delivery = std::env::var("HERDR_POOL_NOTIFY_DELIVERY")

@@ -147,7 +147,7 @@ same reader loop yields `subscription_event` frames.
   Same folder opened in two Herdr workspaces → same scope (desired per spec).
 - Scope storage key: `blake3`/`sha256` hex of canonical path (avoid leaking
   paths in filenames); store mapping `scope_key → canonical_path` in a global
-  index db under plugin state dir.
+  index db under pool state dir.
 - Pool DB per scope: `<state>/pools/<scope_key>/pool.db` (WAL). Registry of
   live agents per scope inside that db. All peer/inbox/send queries are
   scope-local by construction — router re-checks scope on every delivery.
@@ -196,7 +196,7 @@ cross-scope targets with a clear error — never silently deliver.
 
 - Spawned detached by plugin `[[startup]]` hook (one-shot) OR on-demand:
   CLI commands that need freshness run `ensure_daemon()` — pidfile +
-  liveness check under `HERDR_PLUGIN_STATE_DIR` (fallback:
+  liveness check under the pool state dir (`HERDR_POOL_STATE_DIR` → XDG →
   `~/.local/state/herdr-cross-session-messaging/`).
 - Daemon loop: connect `events.subscribe` for `pane.agent_detected`,
   `pane.agent_status_changed` (all panes — filter client-side),
