@@ -16,7 +16,7 @@ mod cli;
 mod commands;
 mod context;
 mod output;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod testutil;
 
 use std::process::ExitCode;

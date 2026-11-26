@@ -1,6 +1,8 @@
 //! End-to-end transport tests against a fake Herdr server speaking NDJSON
 //! over a Unix domain socket in a tempdir.
 
+#![cfg(unix)]
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;

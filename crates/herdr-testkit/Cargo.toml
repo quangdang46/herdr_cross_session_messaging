@@ -8,7 +8,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-[dependencies]
+# The crate is `#![cfg(unix)]` (FakeHerdr binds a UnixListener), so its
+# deps are unix-only too — keeps `cargo` lints clean on other platforms.
+[target.'cfg(unix)'.dependencies]
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true

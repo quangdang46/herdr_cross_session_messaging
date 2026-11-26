@@ -163,7 +163,7 @@ impl Ctx {
     }
 
     /// Explicit constructor (unit tests).
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn for_test(json: bool, client: HerdrClient, state_dir: PathBuf) -> Self {
         Self {
             json,
@@ -480,7 +480,7 @@ pub fn routerd_bin() -> Option<PathBuf> {
 }
 
 /// Helper to build an env lookup from a map in tests.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub fn env_from_map<'a>(
     map: &'a std::collections::HashMap<String, std::ffi::OsString>,
 ) -> impl Fn(&str) -> Option<std::ffi::OsString> + 'a {

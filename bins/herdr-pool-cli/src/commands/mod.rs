@@ -15,5 +15,5 @@ pub mod threads;
 pub mod version;
 pub mod whoami;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

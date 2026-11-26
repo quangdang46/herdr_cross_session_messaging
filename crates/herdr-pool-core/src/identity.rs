@@ -182,10 +182,15 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::ffi::OsString;
+    #[cfg(unix)]
     use std::io::{BufRead, BufReader, Write};
+    #[cfg(unix)]
     use std::os::unix::net::UnixListener;
+    #[cfg(unix)]
     use std::path::Path;
+    #[cfg(unix)]
     use std::sync::mpsc;
+    #[cfg(unix)]
     use std::thread;
 
     fn env<'a>(map: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {

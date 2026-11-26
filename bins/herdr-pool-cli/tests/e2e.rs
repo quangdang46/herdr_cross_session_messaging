@@ -11,6 +11,7 @@
 //! sees `DaemonStatus::Running` and never spawns a real `herdr-routerd`
 //! against the fake socket.
 
+#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;

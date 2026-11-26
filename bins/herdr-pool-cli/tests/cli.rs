@@ -5,6 +5,7 @@
 //! Each test runs one CLI invocation per process, so a single scripted
 //! responder per method suffices (FakeHerdr consumes responders FIFO).
 
+#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;

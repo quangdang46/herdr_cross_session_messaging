@@ -8,6 +8,7 @@
 //! [`FakeHerdr::socket_path`] or through the `HERDR_SOCKET_PATH` env override:
 //!
 //! ```no_run
+//! # #[cfg(unix)]
 //! # fn example() -> herdr_testkit::Result<()> {
 //! let server = herdr_testkit::FakeHerdr::start()?;
 //! std::env::set_var("HERDR_SOCKET_PATH", server.socket_path());
@@ -29,6 +30,7 @@
 // Lint policy: no `unwrap()`/`expect()` in library code; mutex locking goes
 // through [`lock`], which tolerates poisoning. Inline `#[cfg(test)]` modules
 // are exempted per-module below.
+#![cfg(unix)]
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 mod canned;
