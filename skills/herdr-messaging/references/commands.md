@@ -64,6 +64,19 @@ JSON: `{message: MessageJson}` — includes `id` (`msg_*`), `thread_id`,
 Errors: unknown/ambiguous peer, offline peer, self-send, cross-scope target
 (rejected — never silently delivered).
 
+## broadcast
+
+```sh
+herdr-pool broadcast <text> [--json]
+```
+
+Send one message to every live peer in this scope — each recipient gets their
+own message and thread, delivered like an individual `send`. Offline agents
+are skipped. Use only when the user asks to notify all peers at once; prefer
+`send`/`reply` for targeted messages.
+
+JSON: `{recipients: <n>, deliveries: [{agent_id, name, message: MessageJson}…]}`.
+
 ## inbox
 
 ```sh

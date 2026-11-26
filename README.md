@@ -203,6 +203,7 @@ Global flags on every subcommand: `--json`, `--socket-path <PATH>`,
 | `whoami [--json]` | Resolve self via `HERDR_PANE_ID` → agent record + scope |
 | `peers [--json]` | List live agents in the same project scope |
 | `send <peer> <text> [--thread <th_id>]` | Send a message; peer = `ag_*` id, pane/terminal id, or unambiguous name |
+| `broadcast <text>` | Send one message to every live peer in the scope (own thread each) |
 | `inbox [--unread] [--json]` | List messages addressed to this agent |
 | `inbox read <msg_id>` | Mark a message acknowledged, print full content |
 | `reply <msg_id\|th_id> <text>` | Reply inside a thread (to the original sender) |
@@ -383,8 +384,8 @@ threads are sufficient and keep the dep tree small.
 - **Phase 3 — inbox UI**: a native Herdr surface for the inbox — likely a
   `plugin.pane.open` popup/modal fed by a `herdr-pool inbox --follow`-style
   stream — so users don't have to ask an agent to check mail.
-- **Later**: Windows named-pipe transport, broadcast/multicast sends,
-  cross-machine relays (explicitly out of MVP scope).
+- **Later**: Windows named-pipe transport, cross-machine relays (explicitly
+  out of MVP scope).
 
 ## Development
 

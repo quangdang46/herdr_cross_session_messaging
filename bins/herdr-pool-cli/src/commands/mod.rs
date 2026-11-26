@@ -1,6 +1,7 @@
 //! Subcommand implementations. Each module exposes `run(...) -> CmdResult<()>`
 //! and prints human or `--json` output via [`crate::output`].
 
+pub mod broadcast;
 pub mod daemon;
 pub mod deliver;
 pub mod doctor;

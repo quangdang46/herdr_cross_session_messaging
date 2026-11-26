@@ -188,6 +188,7 @@ fn every_subcommand_help_works() {
         &["whoami", "--help"][..],
         &["peers", "--help"][..],
         &["send", "--help"][..],
+        &["broadcast", "--help"][..],
         &["inbox", "--help"][..],
         &["inbox", "read", "--help"][..],
         &["reply", "--help"][..],
@@ -296,6 +297,53 @@ fn send_json_delivers_and_records_prompt() {
     assert!(text.contains("thread th_"));
     assert!(text.contains("review please"));
     assert!(text.contains("Reply: herdr-pool reply msg_"));
+}
+
+#[test]
+fn broadcast_json_delivers_to_every_peer() {
+    let f = Fx::new();
+    f.seed_running_daemon();
+    let cwd = f.project_cwd();
+    script_self(&f.server, "w1:p1", "term_self", &cwd);
+    // Two peers in the same scope.
+    let list = json!({
+        "type": "agent_list",
+        "agents": [
+            agent_json("w1:p1", "term_self", "claude", Some("self"), &cwd, "idle"),
+            agent_json("w1:p2", "term_peer", "codex", Some("peer"), &cwd, "idle"),
+            agent_json("w1:p3", "term_peer2", "devin", Some("peer2"), &cwd, "idle"),
+        ]
+    });
+    for _ in 0..SCRIPT_DEPTH {
+        f.server.on("agent.list").respond(list.clone());
+    }
+    let env = f.env("w1:p1");
+    let out = f.run(&env, &["--json", "broadcast", "all hands"]);
+    let v = Fx::stdout_json(&out);
+    assert_eq!(v["recipients"], 2);
+    let deliveries = v["deliveries"].as_array().unwrap();
+    assert_eq!(deliveries.len(), 2);
+    assert_eq!(deliveries[0]["message"]["status"], "delivered");
+    assert_eq!(deliveries[1]["message"]["status"], "delivered");
+
+    let prompts = f.server.requests_for("agent.prompt");
+    assert_eq!(prompts.len(), 2);
+}
+
+#[test]
+fn broadcast_with_no_peers_succeeds_empty() {
+    let f = Fx::new();
+    f.seed_running_daemon();
+    let cwd = f.project_cwd();
+    script_self(&f.server, "w1:p1", "term_self", &cwd);
+    f.server
+        .on("agent.list")
+        .respond(json!({"type":"agent_list","agents":[]}));
+    let env = f.env("w1:p1");
+    let out = f.run(&env, &["--json", "broadcast", "hi"]);
+    let v = Fx::stdout_json(&out);
+    assert_eq!(v["recipients"], 0);
+    assert!(f.server.requests_for("agent.prompt").is_empty());
 }
 
 #[test]

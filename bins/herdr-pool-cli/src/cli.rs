@@ -74,6 +74,12 @@ pub enum Command {
         thread: Option<String>,
     },
 
+    /// Send a message to every live peer in this project scope.
+    Broadcast {
+        /// Message body (one argument; quote multi-word text).
+        text: String,
+    },
+
     /// List messages addressed to this agent.
     Inbox {
         /// Only show unread (pending/delivered, not acknowledged) messages.
