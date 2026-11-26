@@ -110,10 +110,13 @@ herdr plugin install quangdang46/herdr_cross_session_messaging
 
 The plugin's `[[startup]]` hook runs `herdr-routerd start` automatically after
 Herdr restore/live-handoff, so the daemon is already up before agents send.
-The plugin also ships an `open-inbox` workspace action
-(`herdr plugin action invoke …`) for quick inbox access, and a
-`panel-toggle` action that docks a narrow **left split pane** running the
-live inbox into the current tab — bind it in `~/.config/herdr/config.toml`:
+The plugin also ships an `inbox` popup pane entrypoint
+(`herdr plugin pane open --plugin herdr.cross-session-messaging
+--entrypoint inbox`) for quick inbox access — note that
+`plugin action invoke` runs commands headless and will not show the
+popup. A `panel-toggle` action docks a narrow **left split pane**
+running the live inbox into the current tab — bind it in
+`~/.config/herdr/config.toml`:
 
 ```toml
 [[keys.command]]

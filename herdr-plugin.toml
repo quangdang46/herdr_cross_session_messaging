@@ -23,7 +23,9 @@ command = ["herdr-routerd", "start"]
 id = "open-inbox"
 title = "Messaging inbox"
 contexts = ["workspace"]
-command = ["herdr-pool", "inbox", "--follow"]
+# Actions run headless — delegate to `plugin pane open` so invoking this
+# action actually shows the popup entrypoint.
+command = ["herdr", "plugin", "pane", "open", "--plugin", "herdr.cross-session-messaging", "--entrypoint", "inbox"]
 
 # Left-docked inbox panel: `herdr-pool panel toggle` opens it as a narrow
 # left split in the current tab (close when focused, focus when open).
