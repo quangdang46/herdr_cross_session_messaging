@@ -14,6 +14,7 @@ pub mod reply;
 pub mod rescue;
 pub mod send;
 pub mod threads;
+pub mod update;
 pub mod version;
 pub mod whoami;
 

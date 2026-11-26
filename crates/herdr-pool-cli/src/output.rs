@@ -19,6 +19,8 @@
 //!   `{ok, pid?, message}`; `logs`: `{path, lines}`
 //! - `doctor`: `{ok, checks: [{name, status, detail}]}`
 //! - `install`/`uninstall`: `{scope, targets: [{path, outcome, reason?}]}`
+//! - `update`: `{plugin, source_kind, version_before, version_after,
+//!   skills_project, skills_global, daemon}`
 //! - `version`: `{name, version, skill_version}`
 //! - errors (any command, `--json`): `{"error": {"kind", "message"}}`
 

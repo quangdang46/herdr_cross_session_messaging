@@ -104,6 +104,7 @@ fn run(cli: &cli::Cli) -> Result<(), Failure> {
             agents,
             project.as_deref(),
         ),
+        cli::Command::Update { plugin, global } => commands::update::run(&ctx, plugin, *global),
         cli::Command::Version => commands::version::run(&ctx),
     }
 }

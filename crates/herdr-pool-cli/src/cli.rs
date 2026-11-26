@@ -165,6 +165,20 @@ pub enum Command {
         action: RescueAction,
     },
 
+    /// Self-update: `herdr plugin update` + skill reinstall + daemon restart.
+    Update {
+        /// Plugin id or GitHub source to update.
+        #[arg(
+            long,
+            value_name = "ID",
+            default_value = "herdr.cross-session-messaging"
+        )]
+        plugin: String,
+        /// Also refresh the global (~) skill install.
+        #[arg(long)]
+        global: bool,
+    },
+
     /// Print version information.
     Version,
 }

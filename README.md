@@ -170,6 +170,24 @@ herdr-pool install --global   # per-user (~/.agents/skills, ~/.claude/skills)
 
 `herdr-pool uninstall` removes only what the installer owns.
 
+### Updating
+
+`herdr-pool update` self-updates the whole install in one step:
+
+```bash
+herdr-pool update           # GitHub install: `herdr plugin update` + rebuild
+herdr-pool update --global  # also refresh the per-user skill install
+```
+
+For GitHub-installed plugins it delegates to `herdr plugin update --yes`
+(which refetches the repo and reruns the manifest `[[build]]` commands —
+`cargo install` fresh binaries). For a locally linked checkout it runs
+`git pull --ff-only` in the plugin root plus the same `cargo install
+--path` builds instead. Either way it then reinstalls the skill payload
+with the new binary and restarts `herdr-routerd` if it was running.
+`--json` reports `{plugin, source_kind, version_before, version_after,
+skills_project, skills_global, daemon}`.
+
 ### Agent integrations (`herdr integration install`)
 
 For the best experience — session resume/identity and live agent state —

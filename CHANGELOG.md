@@ -9,6 +9,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `herdr-pool update [--plugin ID] [--global]` — one-step self-update:
+  `herdr plugin update --yes` for GitHub installs, or `git pull --ff-only`
+  + `cargo install --path` for locally linked checkouts; then reinstalls
+  the skill payload with the new binary and restarts `herdr-routerd` if
+  it was running. `--json` reports versions, skill outcomes, and daemon
+  state.
 - Left-docked messaging panel: `herdr-pool panel open|close|toggle|status`
   docks a narrow (~34 col) left split pane running `herdr-pool inbox
   --follow` into the current tab, using `plugin.pane.open` + `pane.swap` +
