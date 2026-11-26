@@ -93,11 +93,45 @@ fn inbox_table(messages: &[Message]) -> String {
     )
 }
 
-/// `inbox --follow`: redraw the inbox every 2s until the process is killed
-/// (the plugin popup closes on Esc/`popup.close`, which terminates us).
-fn follow_inbox(pool: &PoolContext, agent_id: &str, unread: bool) -> CmdResult<()> {
+/// `inbox --follow`: redraw the inbox every 2s until `q`/Esc or the popup
+/// is closed. Interactive keys (raw mode, tty only): `u` toggles the
+/// unread-only filter.
+fn follow_inbox(pool: &PoolContext, agent_id: &str, mut unread: bool) -> CmdResult<()> {
+    use std::io::IsTerminal;
+
+    let keys_enabled = std::io::stdin().is_terminal();
+    if keys_enabled {
+        let _ = crossterm::terminal::enable_raw_mode();
+    }
     let stdout = std::io::stdout();
+    let mut last_render = std::time::Instant::now() - Duration::from_secs(3);
     loop {
+        if keys_enabled {
+            while crossterm::event::poll(Duration::ZERO).unwrap_or(false) {
+                let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() else {
+                    continue;
+                };
+                if key.kind != crossterm::event::KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    crossterm::event::KeyCode::Char('q') | crossterm::event::KeyCode::Esc => {
+                        let _ = crossterm::terminal::disable_raw_mode();
+                        return Ok(());
+                    }
+                    crossterm::event::KeyCode::Char('u') => {
+                        unread = !unread;
+                        last_render = std::time::Instant::now() - Duration::from_secs(3);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if last_render.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        last_render = std::time::Instant::now();
         // A transient store error must not kill the popup — show it and
         // keep redrawing.
         let body = match pool.pool.messages().inbox(agent_id, unread) {
@@ -111,8 +145,9 @@ fn follow_inbox(pool: &PoolContext, agent_id: &str, unread: bool) -> CmdResult<(
             Ok(messages) => inbox_table(&messages),
             Err(err) => format!("inbox error: {err}"),
         };
+        let scope = if unread { "unread" } else { "all" };
         let frame = format!(
-            "\x1b[2J\x1b[Hherdr-pool inbox — live (esc to close)\n{}\n",
+            "\x1b[2J\x1b[Hherdr-pool inbox — live · {scope} (q close · u toggle)\n{}\n",
             fmt_time(crate::context::now_millis())
         );
         let mut out = stdout.lock();
@@ -121,7 +156,6 @@ fn follow_inbox(pool: &PoolContext, agent_id: &str, unread: bool) -> CmdResult<(
         let _ = out.write_all(b"\n");
         let _ = out.flush();
         drop(out);
-        std::thread::sleep(Duration::from_secs(2));
     }
 }
 
