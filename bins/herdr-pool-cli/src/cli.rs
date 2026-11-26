@@ -85,6 +85,9 @@ pub enum Command {
         /// Only show unread (pending/delivered, not acknowledged) messages.
         #[arg(long)]
         unread: bool,
+        /// Keep redrawing the inbox every 2s (for the plugin popup pane).
+        #[arg(long)]
+        follow: bool,
         /// Optional action on one message.
         #[command(subcommand)]
         action: Option<InboxAction>,

@@ -5,13 +5,17 @@
 //! `inbox read <id>` / `message read <id>` mark the message acknowledged
 //! (when it is `pending` or `delivered`) and print the full content.
 
+use std::io::Write;
+use std::time::Duration;
+
 use herdr_plugin::paths::EnvLookup;
+use herdr_pool_core::PoolContext;
 use herdr_pool_store::Message;
 use serde::Serialize;
 
 use crate::cli::InboxAction;
 use crate::context::{open_identity_pool, resolve_identity, upsert_self, CmdResult, Ctx, Failure};
-use crate::output::{emit_json, fmt_time, print_table, snippet, MessageJson};
+use crate::output::{emit_json, fmt_time, snippet, table_string, MessageJson};
 
 #[derive(Serialize)]
 struct InboxJson {
@@ -23,18 +27,23 @@ pub fn run(
     ctx: &Ctx,
     env: &EnvLookup<'_>,
     unread: bool,
+    follow: bool,
     action: Option<&InboxAction>,
 ) -> CmdResult<()> {
     match action {
         Some(InboxAction::Read { id }) => read_message(ctx, env, id),
-        None => list_inbox(ctx, env, unread),
+        None => list_inbox(ctx, env, unread, follow),
     }
 }
 
-fn list_inbox(ctx: &Ctx, env: &EnvLookup<'_>, unread: bool) -> CmdResult<()> {
+fn list_inbox(ctx: &Ctx, env: &EnvLookup<'_>, unread: bool, follow: bool) -> CmdResult<()> {
     let identity = resolve_identity(ctx, env)?;
     let pool = open_identity_pool(ctx, &identity)?;
     let self_record = upsert_self(&pool, &identity)?;
+
+    if follow && !ctx.json {
+        return follow_inbox(&pool, &self_record.agent_id, unread);
+    }
 
     let messages = pool.pool.messages().inbox(&self_record.agent_id, unread)?;
 
@@ -57,7 +66,12 @@ fn list_inbox(ctx: &Ctx, env: &EnvLookup<'_>, unread: bool) -> CmdResult<()> {
         );
         return Ok(());
     }
-    let rows: Vec<Vec<String>> = messages
+    println!("{}", inbox_table(&messages));
+    Ok(())
+}
+
+fn inbox_rows(messages: &[Message]) -> Vec<Vec<String>> {
+    messages
         .iter()
         .map(|m| {
             vec![
@@ -69,9 +83,43 @@ fn list_inbox(ctx: &Ctx, env: &EnvLookup<'_>, unread: bool) -> CmdResult<()> {
                 snippet(&m.content, 60),
             ]
         })
-        .collect();
-    print_table(&["ID", "FROM", "KIND", "STATUS", "TIME", "SNIPPET"], &rows);
-    Ok(())
+        .collect()
+}
+
+fn inbox_table(messages: &[Message]) -> String {
+    table_string(
+        &["ID", "FROM", "KIND", "STATUS", "TIME", "SNIPPET"],
+        &inbox_rows(messages),
+    )
+}
+
+/// `inbox --follow`: redraw the inbox every 2s until the process is killed
+/// (the plugin popup closes on Esc/`popup.close`, which terminates us).
+fn follow_inbox(pool: &PoolContext, agent_id: &str, unread: bool) -> CmdResult<()> {
+    let stdout = std::io::stdout();
+    loop {
+        let messages = pool.pool.messages().inbox(agent_id, unread)?;
+        let body = if messages.is_empty() {
+            if unread {
+                "no unread messages".to_string()
+            } else {
+                "inbox is empty".to_string()
+            }
+        } else {
+            inbox_table(&messages)
+        };
+        let frame = format!(
+            "\x1b[2J\x1b[Hherdr-pool inbox — live (esc to close)\n{}\n",
+            fmt_time(crate::context::now_millis())
+        );
+        let mut out = stdout.lock();
+        let _ = out.write_all(frame.as_bytes());
+        let _ = out.write_all(body.as_bytes());
+        let _ = out.write_all(b"\n");
+        let _ = out.flush();
+        drop(out);
+        std::thread::sleep(Duration::from_secs(2));
+    }
 }
 
 /// Shared `read` path for `inbox read` and `message read`.

@@ -80,13 +80,16 @@ JSON: `{recipients: <n>, deliveries: [{agent_id, name, message: MessageJson}…]
 ## inbox
 
 ```sh
-herdr-pool inbox [--unread] [--json]
+herdr-pool inbox [--unread] [--follow] [--json]
 herdr-pool inbox read <msg_id> [--json]
 ```
 
 List messages addressed to this agent.
 
 - `--unread`: only show unread (pending/delivered, not acknowledged) messages.
+- `--follow`: redraw the inbox every 2s until killed — used by the plugin's
+  popup pane (`herdr plugin pane open --plugin herdr.cross-session-messaging
+  --entrypoint inbox`); agents should not run it interactively.
 - `inbox read <msg_id>`: mark one message acknowledged and print its full
   content.
 

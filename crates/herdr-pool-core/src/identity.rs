@@ -24,6 +24,10 @@ pub const ENV_PANE_ID: &str = "HERDR_PANE_ID";
 pub const ENV_WORKSPACE_ID: &str = "HERDR_WORKSPACE_ID";
 /// Env var carrying the caller's tab id.
 pub const ENV_TAB_ID: &str = "HERDR_TAB_ID";
+/// Env var carrying the plugin invocation context JSON (plugin panes and
+/// popups do not get `HERDR_PANE_ID`; the underlying tiled pane's id is in
+/// `focused_pane_id` here instead).
+pub const ENV_PLUGIN_CONTEXT_JSON: &str = "HERDR_PLUGIN_CONTEXT_JSON";
 
 /// Pane identity parsed from the Herdr-injected environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,19 +40,73 @@ pub struct SelfEnv {
 /// Parse the `HERDR_*` identity vars. All three must be present and
 /// non-empty; a missing var yields [`CoreError::MissingEnv`] — the process
 /// is not running inside a Herdr pane.
+///
+/// Plugin panes (including popups) are the exception: Herdr injects
+/// `HERDR_PLUGIN_CONTEXT_JSON` instead of the `HERDR_*_ID` vars, with the
+/// underlying tiled pane's id in `focused_pane_id`. When the direct vars are
+/// absent, the context JSON is used as the identity source so pool commands
+/// work inside plugin UIs too.
 pub fn self_env_from(env: &EnvLookup<'_>) -> Result<SelfEnv> {
-    Ok(SelfEnv {
-        pane_id: require_env(env, ENV_PANE_ID)?,
-        workspace_id: require_env(env, ENV_WORKSPACE_ID)?,
-        tab_id: require_env(env, ENV_TAB_ID)?,
-    })
+    let pane_id = env_value(env, ENV_PANE_ID);
+    let workspace_id = env_value(env, ENV_WORKSPACE_ID);
+    let tab_id = env_value(env, ENV_TAB_ID);
+    if let (Some(pane_id), Some(workspace_id), Some(tab_id)) = (&pane_id, &workspace_id, &tab_id) {
+        return Ok(SelfEnv {
+            pane_id: pane_id.clone(),
+            workspace_id: workspace_id.clone(),
+            tab_id: tab_id.clone(),
+        });
+    }
+
+    if let Some(context) = env(ENV_PLUGIN_CONTEXT_JSON)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string_lossy().into_owned())
+    {
+        return plugin_context_env(&context);
+    }
+
+    // Report the first missing var so the error names what is absent.
+    for (var, value) in [
+        (ENV_PANE_ID, pane_id),
+        (ENV_WORKSPACE_ID, workspace_id),
+        (ENV_TAB_ID, tab_id),
+    ] {
+        if value.is_none() {
+            return Err(CoreError::MissingEnv(var.to_string()));
+        }
+    }
+    unreachable!("at least one id var was missing above");
 }
 
-fn require_env(env: &EnvLookup<'_>, var: &str) -> Result<String> {
+fn env_value(env: &EnvLookup<'_>, var: &str) -> Option<String> {
     env(var)
         .filter(|v| !v.is_empty())
         .map(|v| v.to_string_lossy().into_owned())
-        .ok_or_else(|| CoreError::MissingEnv(var.to_string()))
+}
+
+/// Extract pane identity from `HERDR_PLUGIN_CONTEXT_JSON`.
+///
+/// The context names the *invocation's* underlying tiled pane
+/// (`focused_pane_id`), which is the right identity for a plugin UI: the
+/// inbox popup shows the focused agent's mail.
+fn plugin_context_env(context_json: &str) -> Result<SelfEnv> {
+    #[derive(serde::Deserialize)]
+    struct PluginContext {
+        workspace_id: Option<String>,
+        tab_id: Option<String>,
+        focused_pane_id: Option<String>,
+    }
+    let ctx: PluginContext = serde_json::from_str(context_json)
+        .map_err(|e| CoreError::InvalidEnv(format!("{ENV_PLUGIN_CONTEXT_JSON}: {e}")))?;
+    let pick = |v: Option<String>| {
+        v.filter(|s| !s.is_empty())
+            .ok_or_else(|| CoreError::MissingEnv(ENV_PANE_ID.to_string()))
+    };
+    Ok(SelfEnv {
+        pane_id: pick(ctx.focused_pane_id)?,
+        workspace_id: pick(ctx.workspace_id)?,
+        tab_id: pick(ctx.tab_id)?,
+    })
 }
 
 /// Everything `whoami` needs: env identity, live records, resolved scope.
@@ -184,6 +242,47 @@ mod tests {
             self_env_from(&e),
             Err(CoreError::MissingEnv(v)) if v == ENV_PANE_ID
         ));
+    }
+
+    #[test]
+    fn self_env_falls_back_to_plugin_context_json() {
+        // Plugin panes/popups get no HERDR_*_ID vars — only the context JSON
+        // naming the underlying tiled pane.
+        let e = env(&[(
+            ENV_PLUGIN_CONTEXT_JSON,
+            r#"{"workspace_id":"w2","tab_id":"w2:t9","focused_pane_id":"w2:p1"}"#,
+        )]);
+        let ids = self_env_from(&e).unwrap();
+        assert_eq!(ids.pane_id, "w2:p1");
+        assert_eq!(ids.workspace_id, "w2");
+        assert_eq!(ids.tab_id, "w2:t9");
+    }
+
+    #[test]
+    fn self_env_direct_vars_win_over_plugin_context() {
+        let e = env(&[
+            ("HERDR_PANE_ID", "w1:p1"),
+            ("HERDR_WORKSPACE_ID", "w1"),
+            ("HERDR_TAB_ID", "w1:t1"),
+            (
+                ENV_PLUGIN_CONTEXT_JSON,
+                r#"{"workspace_id":"w2","tab_id":"w2:t9","focused_pane_id":"w2:p1"}"#,
+            ),
+        ]);
+        let ids = self_env_from(&e).unwrap();
+        assert_eq!(ids.pane_id, "w1:p1");
+    }
+
+    #[test]
+    fn self_env_plugin_context_missing_fields_is_missing_env() {
+        let e = env(&[(ENV_PLUGIN_CONTEXT_JSON, r#"{"workspace_id":"w2"}"#)]);
+        assert!(matches!(self_env_from(&e), Err(CoreError::MissingEnv(_))));
+    }
+
+    #[test]
+    fn self_env_plugin_context_malformed_is_invalid_env() {
+        let e = env(&[(ENV_PLUGIN_CONTEXT_JSON, "not json")]);
+        assert!(matches!(self_env_from(&e), Err(CoreError::InvalidEnv(_))));
     }
 
     // ----- fake socket -------------------------------------------------------

@@ -307,7 +307,9 @@ fn inbox_lists_and_read_acknowledges() {
     .unwrap();
 
     // unread inbox shows it
-    let unread_count = with_env!(f, "w1:p1", |env| { inbox::run(&ctx, env, true, None) });
+    let unread_count = with_env!(f, "w1:p1", |env| {
+        inbox::run(&ctx, env, true, false, None)
+    });
     unread_count.unwrap();
 
     // find the message id and read it
@@ -320,6 +322,7 @@ fn inbox_lists_and_read_acknowledges() {
     with_env!(f, "w1:p1", |env| inbox::run(
         &ctx,
         env,
+        false,
         false,
         Some(&crate::cli::InboxAction::Read { id: msg_id.clone() })
     ))

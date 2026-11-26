@@ -68,9 +68,11 @@ fn run(cli: &cli::Cli) -> Result<(), Failure> {
             commands::send::run(&ctx, &proc_env, peer, text, thread.as_deref())
         }
         cli::Command::Broadcast { text } => commands::broadcast::run(&ctx, &proc_env, text),
-        cli::Command::Inbox { unread, action } => {
-            commands::inbox::run(&ctx, &proc_env, *unread, action.as_ref())
-        }
+        cli::Command::Inbox {
+            unread,
+            follow,
+            action,
+        } => commands::inbox::run(&ctx, &proc_env, *unread, *follow, action.as_ref()),
         cli::Command::Reply { target, text } => commands::reply::run(&ctx, &proc_env, target, text),
         cli::Command::Threads => commands::threads::run(&ctx, &proc_env),
         cli::Command::Message { action } => commands::message::run(&ctx, &proc_env, action),

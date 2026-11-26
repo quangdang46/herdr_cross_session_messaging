@@ -204,7 +204,7 @@ Global flags on every subcommand: `--json`, `--socket-path <PATH>`,
 | `peers [--json]` | List live agents in the same project scope |
 | `send <peer> <text> [--thread <th_id>]` | Send a message; peer = `ag_*` id, pane/terminal id, or unambiguous name |
 | `broadcast <text>` | Send one message to every live peer in the scope (own thread each) |
-| `inbox [--unread] [--json]` | List messages addressed to this agent |
+| `inbox [--unread] [--follow] [--json]` | List messages addressed to this agent (`--follow` redraws live for the popup pane) |
 | `inbox read <msg_id>` | Mark a message acknowledged, print full content |
 | `reply <msg_id\|th_id> <text>` | Reply inside a thread (to the original sender) |
 | `threads [--json]` | Per-thread summaries for the scope |
@@ -378,12 +378,15 @@ threads are sufficient and keep the dep tree small.
 
 ## Roadmap
 
-- **Phase 2 — blocked-agent rescue**: today the daemon queues for
-  `agent_blocked` peers; next is driving recovery (e.g. targeted `send_keys`
-  nudge or surfacing a `notification.show` toast) so messages don't stall.
-- **Phase 3 — inbox UI**: a native Herdr surface for the inbox — likely a
-  `plugin.pane.open` popup/modal fed by a `herdr-pool inbox --follow`-style
-  stream — so users don't have to ask an agent to check mail.
+- **Phase 2 — blocked-agent rescue**: daemon already defers `agent_blocked`
+  mail without consuming attempts and now snapshots the pane tail into the
+  log plus a throttled `notification.show` toast. Remaining: peer-assist
+  (another agent analyzes the snapshot and suggests/executes a nudge).
+- **Phase 3 — inbox UI**: popup pane shipped (`[[panes]] inbox`,
+  `herdr plugin pane open --plugin herdr.cross-session-messaging
+  --entrypoint inbox`) rendering `herdr-pool inbox --follow`; identity inside
+  plugin panes resolves via `HERDR_PLUGIN_CONTEXT_JSON`. Remaining: richer
+  interactive UI (read/reply keys) and `notification.show` hooks.
 - **Later**: Windows named-pipe transport, cross-machine relays (explicitly
   out of MVP scope).
 

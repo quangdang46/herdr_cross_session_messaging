@@ -166,10 +166,12 @@ pub struct WhoamiJson {
 // Human rendering helpers
 // ---------------------------------------------------------------------------
 
-/// A fixed-width table printer: header + rows of string cells.
-pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+/// Render a fixed-width table as a single string (no trailing newline per
+/// row beyond the joins). Shared by [`print_table`] and the `inbox --follow`
+/// redraw loop.
+pub fn table_string(headers: &[&str], rows: &[Vec<String>]) -> String {
     if headers.is_empty() {
-        return;
+        return String::new();
     }
     let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
     for row in rows {
@@ -193,8 +195,18 @@ pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
             .to_string()
     };
     let header_cells: Vec<String> = headers.iter().map(|h| h.to_string()).collect();
-    println!("{}", render(&header_cells));
+    let mut out = render(&header_cells);
     for row in rows {
-        println!("{}", render(row));
+        out.push('\n');
+        out.push_str(&render(row));
+    }
+    out
+}
+
+/// A fixed-width table printer: header + rows of string cells.
+pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+    let table = table_string(headers, rows);
+    if !table.is_empty() {
+        println!("{table}");
     }
 }

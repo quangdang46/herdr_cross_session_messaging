@@ -64,16 +64,32 @@ JSON: `{message: MessageJson}` — includes `id` (`msg_*`), `thread_id`,
 Errors: unknown/ambiguous peer, offline peer, self-send, cross-scope target
 (rejected — never silently delivered).
 
+## broadcast
+
+```sh
+herdr-pool broadcast <text> [--json]
+```
+
+Send one message to every live peer in this scope — each recipient gets their
+own message and thread, delivered like an individual `send`. Offline agents
+are skipped. Use only when the user asks to notify all peers at once; prefer
+`send`/`reply` for targeted messages.
+
+JSON: `{recipients: <n>, deliveries: [{agent_id, name, message: MessageJson}…]}`.
+
 ## inbox
 
 ```sh
-herdr-pool inbox [--unread] [--json]
+herdr-pool inbox [--unread] [--follow] [--json]
 herdr-pool inbox read <msg_id> [--json]
 ```
 
 List messages addressed to this agent.
 
 - `--unread`: only show unread (pending/delivered, not acknowledged) messages.
+- `--follow`: redraw the inbox every 2s until killed — used by the plugin's
+  popup pane (`herdr plugin pane open --plugin herdr.cross-session-messaging
+  --entrypoint inbox`); agents should not run it interactively.
 - `inbox read <msg_id>`: mark one message acknowledged and print its full
   content.
 

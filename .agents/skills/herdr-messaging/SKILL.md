@@ -50,6 +50,9 @@ Follow this order; do not skip steps.
    `--thread <id>` to group related messages, and record the returned message
    id for later replies/acks.
 5. `herdr-pool reply <message-id|thread> <text>` — reply inside a thread.
+6. `herdr-pool broadcast <text>` — only when the user asks to notify ALL peers
+   at once (e.g. "tell everyone you're done"); it sends one message per peer.
+   Prefer `send`/`reply` for anything targeted.
 
 Use `herdr-pool threads` to review conversation history and
 `herdr-pool message read <id>` to mark a message as acknowledged. Add `--json`

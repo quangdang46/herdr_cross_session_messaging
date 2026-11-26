@@ -13,3 +13,12 @@ id = "open-inbox"
 title = "Messaging inbox"
 contexts = ["workspace"]
 command = ["herdr-pool", "inbox"]
+
+[[panes]]
+id = "inbox"
+title = "Messaging inbox"
+platforms = ["linux", "macos", "windows"]
+placement = "popup"
+width = "80%"
+height = 20
+command = ["herdr-pool", "inbox", "--follow"]

@@ -12,6 +12,9 @@ pub enum CoreError {
     /// Required `HERDR_*` env var is absent or empty.
     #[error("missing env var: {0}")]
     MissingEnv(String),
+    /// A `HERDR_*` env var is present but malformed.
+    #[error("invalid env var: {0}")]
+    InvalidEnv(String),
     /// Could not determine a project scope for the pane/agent.
     #[error("scope unresolved: {0}")]
     ScopeUnresolved(String),
