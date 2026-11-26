@@ -54,6 +54,11 @@ All notable changes to this project are documented here. The format follows
   silenced under `--json`.
 - `inbox`/`message read` now acknowledge `pending` mail too, so explicitly
   read messages are not prompted again by the delivery worker.
+- State dir split-brain: `HERDR_PLUGIN_STATE_DIR` is no longer consulted for
+  pool state. Agent panes never receive plugin env vars, so plugin-spawned
+  daemons and agent CLIs resolved different state dirs and kept separate
+  pools. `HERDR_POOL_STATE_DIR` → XDG → home is now the single resolution
+  chain everywhere.
 - `reply` marks the original `msg_*` message acknowledged (best-effort).
 - Agents whose resolved scope changes (terminal reused in another project)
   no longer leave a live ghost record in the old scope's registry.
