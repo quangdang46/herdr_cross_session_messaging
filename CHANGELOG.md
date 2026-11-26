@@ -36,7 +36,10 @@ All notable changes to this project are documented here. The format follows
   are excluded from re-picks for that job (R8 — no retrying a helper that
   just went blocked), and `assigned` rows stale past
   `RESCUE_ASSIGNED_STALE` (60s — the crash window between reserve and
-  prompt) return to `pending` for redispatch.
+  prompt) return to `pending` for redispatch. An agent whose latest job
+  ended `needs_human` is muted until it is observed un-blocked, so a
+  permanently stuck agent does not churn a fresh job (and toast) every
+  sweep; a recovered-then-reblocked agent starts a new episode normally.
 - `herdr-pool rescue <rs-id> done|needs-human` — the assigned helper reports
   its outcome back to the pool: `done` moves the job to `verifying` (the
   monitor still requires the source to actually leave `blocked`, with a
