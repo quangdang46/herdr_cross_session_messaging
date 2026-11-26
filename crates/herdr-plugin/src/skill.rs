@@ -20,7 +20,7 @@ use crate::error::{PluginError, Result};
 pub const SKILL_NAME: &str = "herdr-messaging";
 
 /// Skill payload version. Keep in sync with the crate version.
-pub const SKILL_VERSION: &str = "0.4.0";
+pub const SKILL_VERSION: &str = "0.1.0";
 
 /// Marker file written into installed skill dirs to record ownership.
 pub const MANAGED_MARKER: &str = ".herdr-messaging-managed";
