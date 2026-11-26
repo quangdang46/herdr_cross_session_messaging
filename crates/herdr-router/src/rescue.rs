@@ -26,8 +26,8 @@
 //! delivery poll for detection of agents blocked without pending mail,
 //! dispatch, monitoring, and expiry.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use herdr_pool_store::{AgentRecord, PoolStore, RescueJob, RescueStatus, STATUS_OFFLINE};
@@ -68,6 +68,13 @@ pub struct RescueManager {
     job_timeout: Duration,
     /// Max dispatch attempts before `needs_human`.
     max_attempts: u32,
+    /// Helpers whose dispatch prompt was rejected, per rescue job. The
+    /// registry status may lag a `agent_blocked` rejection by a status
+    /// event, so without this the same helper would be deterministically
+    /// re-picked until the attempt cap fires (R8). In-memory only: a
+    /// daemon restart simply forgets the exclusions — the attempt cap
+    /// still bounds retries.
+    failed_helpers: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl RescueManager {
@@ -77,6 +84,7 @@ impl RescueManager {
             pools,
             job_timeout: RESCUE_JOB_TIMEOUT,
             max_attempts: RESCUE_MAX_ATTEMPTS,
+            failed_helpers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -173,6 +181,11 @@ impl RescueManager {
                 return Ok(());
             }
         };
+        // Drop failure memory for jobs that are no longer open.
+        if let Ok(mut failed) = self.failed_helpers.lock() {
+            let open_ids: HashSet<&str> = open.iter().map(|j| j.rescue_id.as_str()).collect();
+            failed.retain(|id, _| open_ids.contains(id.as_str()));
+        }
         // `reserved` is mutated as jobs dispatch within this sweep, so two
         // pending jobs never pick the same helper in one pass (R6).
         let mut reserved: HashSet<String> = open
@@ -278,7 +291,13 @@ impl RescueManager {
             return Ok(()); // assigned/running/verifying: helper owns it now
         }
 
-        self.dispatch(pool, job, agents, by_id, reserved)
+        let failed = self
+            .failed_helpers
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&job.rescue_id).cloned())
+            .unwrap_or_default();
+        self.dispatch(pool, job, agents, by_id, reserved, &failed)
     }
 
     /// Pick a helper and dispatch the rescue prompt. The job stays
@@ -290,11 +309,12 @@ impl RescueManager {
         agents: &[AgentRecord],
         by_id: &std::collections::HashMap<&str, &AgentRecord>,
         reserved: &mut HashSet<String>,
+        failed: &HashSet<String>,
     ) -> Result<()> {
         let Some(source) = by_id.get(job.source_agent_id.as_str()).copied() else {
             return Ok(());
         };
-        let Some(helper) = pick_helper(agents, &job.source_agent_id, reserved) else {
+        let Some(helper) = pick_helper(agents, &job.source_agent_id, reserved, failed) else {
             return Ok(()); // stays pending — retried next sweep
         };
         let Some(helper_target) = herdr_target(helper) else {
@@ -336,8 +356,16 @@ impl RescueManager {
             }
             Err(err) => {
                 // Helper rejected/vanished mid-dispatch: release the
-                // reservation so another helper (or a later sweep) can try.
+                // reservation so another helper (or a later sweep) can try,
+                // and exclude this helper for the job — the registry status
+                // may still look eligible until the blocked event lands.
                 let _ = rescues.unassign(&job.rescue_id);
+                if let Ok(mut failed_map) = self.failed_helpers.lock() {
+                    failed_map
+                        .entry(job.rescue_id.clone())
+                        .or_default()
+                        .insert(helper.agent_id.clone());
+                }
                 tracing::debug!(
                     rescue = %job.rescue_id,
                     helper = %helper.agent_id,
@@ -441,19 +469,22 @@ fn helper_rank(status: &str) -> Option<u8> {
 ///
 /// Excludes: the source itself, offline agents (already filtered by
 /// `list_agents(false)` but re-checked), blocked/unknown-status agents,
-/// agents with no Herdr target, and helpers already holding a reservation
-/// (`reserved`). Deterministic: status rank, then agent_id — never the
+/// agents with no Herdr target, helpers already holding a reservation
+/// (`reserved`), and helpers whose dispatch already failed for this job
+/// (`failed`). Deterministic: status rank, then agent_id — never the
 /// raw `list_agents` order.
 fn pick_helper<'a>(
     agents: &'a [AgentRecord],
     source_agent_id: &str,
     reserved: &HashSet<String>,
+    failed: &HashSet<String>,
 ) -> Option<&'a AgentRecord> {
     agents
         .iter()
         .filter(|a| a.agent_id != source_agent_id)
         .filter(|a| a.status != STATUS_OFFLINE)
         .filter(|a| !reserved.contains(&a.agent_id))
+        .filter(|a| !failed.contains(&a.agent_id))
         .filter(|a| herdr_target(a).is_some())
         .filter_map(|a| helper_rank(&a.status).map(|rank| (rank, a)))
         .min_by(|(ra, a), (rb, b)| ra.cmp(rb).then_with(|| a.agent_id.cmp(&b.agent_id)))
@@ -490,7 +521,8 @@ mod tests {
             agent("ag_done", "done"),
         ];
         let reserved = HashSet::new();
-        let pick = pick_helper(&agents, "ag_src", &reserved).unwrap();
+        let failed = HashSet::new();
+        let pick = pick_helper(&agents, "ag_src", &reserved, &failed).unwrap();
         assert_eq!(pick.agent_id, "ag_idle");
     }
 
@@ -502,7 +534,8 @@ mod tests {
             agent("ag_c", "idle"),
         ];
         let reserved = HashSet::new();
-        let pick = pick_helper(&agents, "ag_src", &reserved).unwrap();
+        let failed = HashSet::new();
+        let pick = pick_helper(&agents, "ag_src", &reserved, &failed).unwrap();
         assert_eq!(pick.agent_id, "ag_c");
     }
 
@@ -516,23 +549,40 @@ mod tests {
         let mut agents = agents;
         agents[1].status = STATUS_OFFLINE.into();
         let reserved: HashSet<String> = ["ag_r".to_string()].into_iter().collect();
-        let pick = pick_helper(&agents, "ag_src", &reserved).unwrap();
+        let failed = HashSet::new();
+        let pick = pick_helper(&agents, "ag_src", &reserved, &failed).unwrap();
         assert_eq!(pick.agent_id, "ag_free");
+    }
+
+    #[test]
+    fn pick_helper_skips_failed_helpers() {
+        let agents = vec![agent("ag_bad", "idle"), agent("ag_good", "idle")];
+        let reserved = HashSet::new();
+        let failed: HashSet<String> = ["ag_bad".to_string()].into_iter().collect();
+        let pick = pick_helper(&agents, "ag_src", &reserved, &failed).unwrap();
+        assert_eq!(pick.agent_id, "ag_good");
+        // With every candidate failed for this job, nothing qualifies.
+        let failed: HashSet<String> = ["ag_bad".to_string(), "ag_good".to_string()]
+            .into_iter()
+            .collect();
+        assert!(pick_helper(&agents, "ag_src", &reserved, &failed).is_none());
     }
 
     #[test]
     fn pick_helper_returns_none_when_all_blocked() {
         let agents = vec![agent("ag_a", "blocked"), agent("ag_b", "blocked")];
         let reserved = HashSet::new();
-        assert!(pick_helper(&agents, "ag_a", &reserved).is_none());
-        assert!(pick_helper(&agents, "ag_b", &reserved).is_none());
+        let failed = HashSet::new();
+        assert!(pick_helper(&agents, "ag_a", &reserved, &failed).is_none());
+        assert!(pick_helper(&agents, "ag_b", &reserved, &failed).is_none());
     }
 
     #[test]
     fn pick_helper_deterministic_on_ties() {
         let agents = vec![agent("ag_z", "idle"), agent("ag_a", "idle")];
         let reserved = HashSet::new();
-        let pick = pick_helper(&agents, "ag_src", &reserved).unwrap();
+        let failed = HashSet::new();
+        let pick = pick_helper(&agents, "ag_src", &reserved, &failed).unwrap();
         assert_eq!(pick.agent_id, "ag_a");
     }
 }
