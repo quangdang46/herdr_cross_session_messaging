@@ -71,6 +71,7 @@ fn test_config(state_dir: &std::path::Path, socket: &std::path::Path) -> DaemonC
         reconcile_interval: Duration::from_secs(3600),
         delivery_poll: Duration::from_millis(50),
         event_wakeup: Duration::from_millis(200),
+        notify_on_delivery: false,
     }
 }
 
@@ -477,6 +478,54 @@ fn delivery_worker_blocked_escalates_to_peer_helper() {
 
     // Second drain: message still deferred, no duplicate escalation.
     assert_eq!(worker.drain_once().unwrap(), 0);
+}
+
+#[test]
+fn delivery_worker_notifies_on_delivery_when_enabled() {
+    let server = FakeHerdr::start().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+
+    let pools = Arc::new(Pools::open(state.path()).unwrap());
+    let pool = pools
+        .for_scope_key("0123456789abcdef0123456789abcdef", project.path())
+        .unwrap();
+    pool.registry()
+        .upsert_agent(&herdr_pool_store::AgentRecord {
+            agent_id: "ag_target".into(),
+            scope_key: "0123456789abcdef0123456789abcdef".into(),
+            terminal_id: Some("term_target".into()),
+            pane_id: Some("w9:p9".into()),
+            agent_kind: Some("claude".into()),
+            name: Some("target".into()),
+            cwd: None,
+            status: "idle".into(),
+            bootstrap_version: None,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            offline_at: None,
+        })
+        .unwrap();
+    pool.messages()
+        .send("ag_sender", "ag_target", "notify me")
+        .unwrap();
+
+    let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
+    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = DeliveryWorker::new(
+        client,
+        pools,
+        shutdown,
+        Notify::default(),
+        Duration::from_millis(10),
+    )
+    .with_notify_on_delivery(true);
+    assert_eq!(worker.drain_once().unwrap(), 1);
+
+    let toasts = server.requests_for("notification.show");
+    assert_eq!(toasts.len(), 1, "expected one delivery toast");
+    let title = toasts[0].params["title"].as_str().unwrap();
+    assert!(title.contains("target"), "{title}");
 }
 
 #[test]

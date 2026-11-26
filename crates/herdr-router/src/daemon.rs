@@ -84,6 +84,9 @@ pub struct DaemonConfig {
     pub delivery_poll: Duration,
     /// Subscribe read timeout / event-loop wakeup period.
     pub event_wakeup: Duration,
+    /// Toast the user on each delivered message
+    /// (`HERDR_POOL_NOTIFY_DELIVERY=1|true|yes`).
+    pub notify_on_delivery: bool,
 }
 
 impl DaemonConfig {
@@ -95,13 +98,18 @@ impl DaemonConfig {
             reconcile_interval: RECONCILE_INTERVAL,
             delivery_poll: DEFAULT_POLL_INTERVAL,
             event_wakeup: EVENT_WAKEUP,
+            notify_on_delivery: false,
         }
     }
 
     /// Config from the process environment (`HERDR_PLUGIN_STATE_DIR` →
     /// `HERDR_POOL_STATE_DIR` → XDG → home), socket from env.
     pub fn from_env() -> Result<Self> {
-        Ok(Self::for_state_dir(plugin_state_dir()?))
+        let mut config = Self::for_state_dir(plugin_state_dir()?);
+        config.notify_on_delivery = std::env::var("HERDR_POOL_NOTIFY_DELIVERY")
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+        Ok(config)
     }
 }
 
@@ -359,7 +367,8 @@ impl Daemon {
             Arc::clone(&self.shutdown),
             self.notify.clone(),
             self.config.delivery_poll,
-        );
+        )
+        .with_notify_on_delivery(self.config.notify_on_delivery);
         let stop_file = self.config.state_dir.join(SHUTDOWN_FILE_NAME);
         worker.run(Some(&stop_file));
     }

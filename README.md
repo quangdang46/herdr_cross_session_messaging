@@ -276,6 +276,8 @@ in the pool.
 - **Daemon runtime**: pidfile/lock + logs under `<state>/`;
   `herdr-pool daemon logs` (or `herdr-routerd logs`) prints
   `<state>/logs/routerd.log` and recent lines.
+- **Daemon env**: `HERDR_POOL_NOTIFY_DELIVERY=1` toasts the user on every
+  successful delivery (off by default — agents already get prompted).
 - **CLI overrides**: `--socket-path`, `--state-dir` on any `herdr-pool`
   command; `-v` for debug logging (`RUST_LOG`/`HERDR_LOG` respected).
 - **Skill payload**: embedded in the binary at build time

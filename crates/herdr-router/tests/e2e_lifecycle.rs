@@ -98,6 +98,7 @@ fn test_config(state_dir: &std::path::Path, socket: &std::path::Path) -> DaemonC
         reconcile_interval: Duration::from_secs(3600),
         delivery_poll: Duration::from_millis(50),
         event_wakeup: Duration::from_millis(200),
+        notify_on_delivery: false,
     }
 }
 

@@ -99,6 +99,8 @@ pub struct DeliveryWorker {
     blocked_escalated: std::cell::RefCell<std::collections::HashSet<String>>,
     /// Blocked duration that triggers peer-assist escalation.
     blocked_escalate_after: Duration,
+    /// Toast the user on every successful delivery (`HERDR_POOL_NOTIFY_DELIVERY`).
+    notify_on_delivery: bool,
 }
 
 impl DeliveryWorker {
@@ -120,12 +122,19 @@ impl DeliveryWorker {
             blocked_since: std::cell::RefCell::new(std::collections::HashMap::new()),
             blocked_escalated: std::cell::RefCell::new(std::collections::HashSet::new()),
             blocked_escalate_after: BLOCKED_ESCALATE_AFTER,
+            notify_on_delivery: false,
         }
     }
 
     /// Override the blocked-escalation delay (tests).
     pub fn with_blocked_escalate_after(mut self, delay: Duration) -> Self {
         self.blocked_escalate_after = delay;
+        self
+    }
+
+    /// Toast the user on each successful delivery (opt-in via env).
+    pub fn with_notify_on_delivery(mut self, enabled: bool) -> Self {
+        self.notify_on_delivery = enabled;
         self
     }
 
@@ -215,6 +224,9 @@ impl DeliveryWorker {
                 messages.mark_delivered(&msg.id)?;
                 self.clear_blocked_episode(&msg.to_agent);
                 tracing::info!(message = %msg.id, to = %msg.to_agent, "message delivered");
+                if self.notify_on_delivery {
+                    self.notify_delivered(&recipient, sender.as_ref(), msg);
+                }
             }
             Err(err) if err.is_agent_blocked() => {
                 // Agent is alive but busy: nothing was sent. Defer without
@@ -474,6 +486,31 @@ impl DeliveryWorker {
             sound: None,
         }) {
             tracing::debug!(error = %err, "blocked-agent notification failed");
+        }
+    }
+
+    /// Opt-in `notification.show` toast for a delivered message.
+    fn notify_delivered(
+        &self,
+        recipient: &herdr_pool_store::AgentRecord,
+        sender: Option<&herdr_pool_store::AgentRecord>,
+        msg: &Message,
+    ) {
+        let to = recipient
+            .name
+            .clone()
+            .unwrap_or_else(|| recipient.agent_id.clone());
+        let from = sender
+            .and_then(|s| s.name.clone())
+            .unwrap_or_else(|| msg.from_agent.clone());
+        let snippet: String = msg.content.chars().take(80).collect();
+        if let Err(err) = self.client.notification_show(&NotificationShowParams {
+            title: format!("herdr-pool: new message for {to}"),
+            body: Some(format!("from {from}: {snippet}")),
+            position: None,
+            sound: None,
+        }) {
+            tracing::debug!(error = %err, "delivery notification failed");
         }
     }
 
