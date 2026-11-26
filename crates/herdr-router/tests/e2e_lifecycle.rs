@@ -402,6 +402,12 @@ fn blocked_status_schedules_message_and_idle_delivers() {
     assert!(wait_until(WAIT, "bootstrap", || {
         bootstrap_prompts(&server) == 1
     }));
+    // Pushed subscription frames are broadcast-only: an event sent before
+    // `events.subscribe` connects is lost. Wait for the subscription itself
+    // (it is issued after the snapshot sync that produced the bootstrap).
+    assert!(wait_until(WAIT, "events.subscribe", || {
+        !server.requests_for("events.subscribe").is_empty()
+    }));
     let pool = only_pool(&daemon);
     let agent = live_agent(&pool);
 
