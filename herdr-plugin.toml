@@ -23,7 +23,7 @@ command = ["herdr-routerd", "start"]
 id = "open-inbox"
 title = "Messaging inbox"
 contexts = ["workspace"]
-command = ["herdr-pool", "inbox"]
+command = ["herdr-pool", "inbox", "--follow"]
 
 # Left-docked inbox panel: `herdr-pool panel toggle` opens it as a narrow
 # left split in the current tab (close when focused, focus when open).
