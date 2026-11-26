@@ -11,13 +11,21 @@
 //! | `agent.prompt` outcome | action |
 //! |---|---|
 //! | success | `mark_delivered` |
-//! | `agent_blocked` | `defer(now + 15s)` — harness queues nothing; retry shortly, no attempt consumed; throttled pane snapshot + `notification.show` rescue notice |
+//! | `agent_blocked` | `defer(now + 15s)` — harness queues nothing; retry shortly, no attempt consumed; throttled pane snapshot + `notification.show` rescue notice; a [`RescueManager`] job is ensured for peer-assisted recovery |
 //! | `agent_not_ready` / `agent_not_found` / `agent_target_ambiguous` / stalled | `record_failure(now + backoff(attempts))` |
 //! | transport/timeout/other | `record_failure(now + backoff(attempts))` |
 //! | recipient offline > [`OFFLINE_DEAD_AFTER`] | dead-letter immediately + throttled `notification.show` |
 //!
 //! `record_failure` dead-letters at [`MAX_DELIVERY_ATTEMPTS`] attempts.
 //! Backoff is exponential: 5s × 2^attempts capped at 5 minutes, plus jitter.
+//!
+//! ## Peer TUI rescue
+//!
+//! Blocked-agent recovery lives in [`crate::rescue::RescueManager`], not
+//! here: this worker only *notices* `agent_blocked` (and registry `blocked`
+//! statuses on each sweep) and ensures a durable rescue job exists. The
+//! manager snapshots the source pane, picks an eligible same-scope helper,
+//! reserves it, and dispatches a `[HERDR RESCUE REQUEST]` prompt.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,6 +39,7 @@ use crate::envelope::message_envelope;
 use crate::error::Result;
 use crate::pools::Pools;
 use crate::registry_sync::{now_millis, Notify};
+use crate::rescue::RescueManager;
 
 /// Base retry delay for the first failed attempt.
 pub const BACKOFF_BASE: Duration = Duration::from_secs(5);
@@ -46,11 +55,8 @@ pub const OFFLINE_DEAD_AFTER: Duration = Duration::from_secs(5 * 60);
 pub const DEAD_NOTIFY_INTERVAL: Duration = Duration::from_secs(60);
 /// Minimum interval between blocked-agent rescue notices per recipient.
 pub const BLOCKED_NOTIFY_INTERVAL: Duration = Duration::from_secs(120);
-/// Lines of pane output captured for the blocked-agent snapshot.
+/// Lines of pane output captured for the blocked-agent log/toast snapshot.
 pub const BLOCKED_SNAPSHOT_LINES: u32 = 30;
-/// How long a recipient may stay `agent_blocked` before the daemon asks a
-/// peer agent in the same scope to check on it (rescue escalation).
-pub const BLOCKED_ESCALATE_AFTER: Duration = Duration::from_secs(5 * 60);
 /// How often the worker sweeps the outbox when idle.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -93,12 +99,8 @@ pub struct DeliveryWorker {
     last_dead_notify: std::cell::Cell<Option<std::time::Instant>>,
     /// Last rescue notice per recipient agent_id (throttle).
     last_blocked_notify: std::cell::RefCell<std::collections::HashMap<String, std::time::Instant>>,
-    /// First `agent_blocked` defer seen per recipient (escalation timer).
-    blocked_since: std::cell::RefCell<std::collections::HashMap<String, std::time::Instant>>,
-    /// Recipients already escalated to a peer helper this blocked episode.
-    blocked_escalated: std::cell::RefCell<std::collections::HashSet<String>>,
-    /// Blocked duration that triggers peer-assist escalation.
-    blocked_escalate_after: Duration,
+    /// Peer TUI rescue coordinator (detection, dispatch, monitoring).
+    rescue: RescueManager,
     /// Toast the user on every successful delivery (`HERDR_POOL_NOTIFY_DELIVERY`).
     notify_on_delivery: bool,
 }
@@ -112,6 +114,7 @@ impl DeliveryWorker {
         poll_interval: Duration,
     ) -> Self {
         Self {
+            rescue: RescueManager::new(client.clone(), Arc::clone(&pools)),
             client,
             pools,
             shutdown,
@@ -119,17 +122,21 @@ impl DeliveryWorker {
             poll_interval,
             last_dead_notify: std::cell::Cell::new(None),
             last_blocked_notify: std::cell::RefCell::new(std::collections::HashMap::new()),
-            blocked_since: std::cell::RefCell::new(std::collections::HashMap::new()),
-            blocked_escalated: std::cell::RefCell::new(std::collections::HashSet::new()),
-            blocked_escalate_after: BLOCKED_ESCALATE_AFTER,
             notify_on_delivery: false,
         }
     }
 
-    /// Override the blocked-escalation delay (tests).
-    pub fn with_blocked_escalate_after(mut self, delay: Duration) -> Self {
-        self.blocked_escalate_after = delay;
+    /// Override the rescue job timeout / attempt cap (tests).
+    pub fn with_rescue_timeouts(mut self, job_timeout: Duration, max_attempts: u32) -> Self {
+        self.rescue.set_job_timeout(job_timeout);
+        self.rescue.set_max_attempts(max_attempts);
         self
+    }
+
+    /// Run one rescue sweep (detect → expire → monitor → dispatch).
+    /// Called by [`Self::run`] every poll; exposed for `tick` and tests.
+    pub fn sweep_rescue(&self) -> Result<()> {
+        self.rescue.sweep_once()
     }
 
     /// Toast the user on each successful delivery (opt-in via env).
@@ -152,6 +159,9 @@ impl DeliveryWorker {
             }
             if let Err(err) = self.drain_once() {
                 tracing::warn!(error = %err, "outbox drain failed");
+            }
+            if let Err(err) = self.sweep_rescue() {
+                tracing::warn!(error = %err, "rescue sweep failed");
             }
             let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
             let (guard, _) = cvar
@@ -222,7 +232,6 @@ impl DeliveryWorker {
         match self.client.agent_prompt(&target, &text, None) {
             Ok(_) => {
                 messages.mark_delivered(&msg.id)?;
-                self.clear_blocked_episode(&msg.to_agent);
                 tracing::info!(message = %msg.id, to = %msg.to_agent, "message delivered");
                 if self.notify_on_delivery {
                     self.notify_delivered(&recipient, sender.as_ref(), msg);
@@ -233,10 +242,13 @@ impl DeliveryWorker {
                 // consuming an attempt — blocking is not a delivery
                 // failure, and dead-lettering busy agents' mail would lose
                 // it invisibly (dead rows never reach the inbox).
-                self.note_blocked(&msg.to_agent);
                 self.defer_retry(messages, msg, BLOCKED_BACKOFF)?;
                 self.maybe_rescue_blocked(&recipient, &target);
-                self.maybe_escalate_blocked(pool, messages, &recipient, &target);
+                // Ensure a durable peer-rescue job exists; the rescue
+                // sweep dispatches it to an eligible helper.
+                if let Err(err) = self.rescue.ensure_job(pool, &recipient) {
+                    tracing::debug!(agent = %recipient.agent_id, error = %err, "rescue ensure_job failed");
+                }
             }
             Err(err) => {
                 let delay = if err.is_agent_not_found()
@@ -258,109 +270,9 @@ impl DeliveryWorker {
         Ok(())
     }
 
-    /// Record the start of a blocked episode for escalation timing.
-    fn note_blocked(&self, agent_id: &str) {
-        self.blocked_since
-            .borrow_mut()
-            .entry(agent_id.to_string())
-            .or_insert_with(std::time::Instant::now);
-    }
-
-    /// A blocked episode ends when mail delivers or the agent goes offline.
-    fn clear_blocked_episode(&self, agent_id: &str) {
-        self.blocked_since.borrow_mut().remove(agent_id);
-        self.blocked_escalated.borrow_mut().remove(agent_id);
-    }
-
-    /// Peer-assist escalation: once a recipient has been `agent_blocked` for
-    /// [`Self::blocked_escalate_after`], prompt another live agent in the
-    /// same scope to check on it. Once per blocked episode; best-effort.
-    fn maybe_escalate_blocked(
-        &self,
-        pool: &PoolStore,
-        messages: &MessageStore<'_>,
-        recipient: &herdr_pool_store::AgentRecord,
-        target: &str,
-    ) {
-        if self
-            .blocked_escalated
-            .borrow()
-            .contains(&recipient.agent_id)
-        {
-            return;
-        }
-        let blocked_for = self
-            .blocked_since
-            .borrow()
-            .get(&recipient.agent_id)
-            .map(|t| t.elapsed())
-            .unwrap_or_default();
-        if blocked_for < self.blocked_escalate_after {
-            return;
-        }
-
-        // Any other live agent in this scope can assist.
-        let helper = match pool.registry().list_agents(false) {
-            Ok(agents) => agents
-                .into_iter()
-                .find(|a| a.agent_id != recipient.agent_id),
-            Err(err) => {
-                tracing::debug!(error = %err, "escalation: registry list failed");
-                return;
-            }
-        };
-        let Some(helper) = helper else {
-            return; // no peer to ask — retry on the next blocked defer
-        };
-        let helper_target = helper
-            .pane_id
-            .clone()
-            .filter(|p| !p.is_empty())
-            .or_else(|| helper.name.clone().filter(|n| !n.is_empty()))
-            .or_else(|| helper.terminal_id.clone().filter(|t| !t.is_empty()));
-        let Some(helper_target) = helper_target else {
-            return;
-        };
-
-        let queued = messages
-            .inbox(&recipient.agent_id, true)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        let snapshot = self.pane_snapshot(target);
-        let who = recipient
-            .name
-            .clone()
-            .unwrap_or_else(|| recipient.agent_id.clone());
-        let text = format!(
-            "[herdr-pool] rescue assist: agent {who} ({}) has been blocked for \
-             over {}s with {queued} message(s) queued in the pool.\n\
-             Pane snapshot tail:\n{snapshot}\n\
-             Please check on it (`herdr agent explain {}` or `herdr-pool peers`) \
-             and if it needs the user's attention, surface that to the user. \
-             Do not send keys or interrupt the agent yourself.",
-            recipient.agent_id,
-            blocked_for.as_secs(),
-            recipient.pane_id.as_deref().unwrap_or("?"),
-        );
-
-        match self.client.agent_prompt(&helper_target, &text, None) {
-            Ok(_) => {
-                self.blocked_escalated
-                    .borrow_mut()
-                    .insert(recipient.agent_id.clone());
-                tracing::info!(
-                    agent = %recipient.agent_id,
-                    helper = %helper.agent_id,
-                    "blocked agent escalated to peer assist"
-                );
-            }
-            Err(err) => {
-                tracing::debug!(error = %err, "rescue escalation prompt failed");
-            }
-        }
-    }
-
-    /// Last lines of a pane's recent output for rescue context.
+    /// Last lines of a pane's recent output for the blocked-agent
+    /// log/toast snapshot (delivery-side diagnostic only — the rescue
+    /// snapshotter in [`crate::rescue`] captures the full visible TUI).
     fn pane_snapshot(&self, target: &str) -> String {
         match self.client.agent_read(&AgentReadParams {
             target: target.to_string(),
@@ -394,7 +306,6 @@ impl DeliveryWorker {
         if offline_for > OFFLINE_DEAD_AFTER.as_millis() as i64 {
             self.dead_letter(messages, msg)?;
             self.maybe_notify_dead(msg);
-            self.clear_blocked_episode(&msg.to_agent);
             return Ok(());
         }
         // While offline, poll no faster than once a minute.

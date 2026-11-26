@@ -671,6 +671,14 @@ pub fn run_tick(client: &HerdrClient, state_dir: &Path) -> Result<usize> {
     let mut synced = sync.sync_snapshot()?;
     synced += sync.reconcile()?;
     sync.refresh_watched();
+    // Rescue sweep: dispatch/monitor/expire jobs left over from before a
+    // restart or accumulated while the daemon was down. Best-effort —
+    // tick must not fail because a helper prompt was rejected.
+    if let Err(err) =
+        crate::rescue::RescueManager::new(client.clone(), Arc::new(pools)).sweep_once()
+    {
+        tracing::warn!(error = %err, "tick: rescue sweep failed");
+    }
     Ok(synced)
 }
 

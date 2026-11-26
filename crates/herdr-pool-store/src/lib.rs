@@ -16,9 +16,11 @@ pub mod error;
 pub mod migrations;
 pub mod pool;
 pub mod registry;
+pub mod rescue;
 pub mod store;
 
 pub use error::{Result, StoreError};
 pub use pool::{PoolStore, ScopeEntry, ScopeIndex};
 pub use registry::{new_agent_id, AgentRecord, RegistryStore, STATUS_OFFLINE};
+pub use rescue::{new_rescue_id, RescueJob, RescueStatus, RescueStore};
 pub use store::{Message, MessageStatus, MessageStore, Thread, MAX_DELIVERY_ATTEMPTS};

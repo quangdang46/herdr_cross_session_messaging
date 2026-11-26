@@ -25,6 +25,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::error::Result;
 use crate::migrations;
 use crate::registry::RegistryStore;
+use crate::rescue::RescueStore;
 use crate::store::{configure_connection, lock, now_millis, MessageStore};
 
 /// Handle to one scope's pool database (`<state>/pools/<scope_key>/pool.db`).
@@ -83,6 +84,11 @@ impl PoolStore {
     /// Borrow the agent registry repository for this scope.
     pub fn registry(&self) -> RegistryStore<'_> {
         RegistryStore::new(self)
+    }
+
+    /// Borrow the rescue job repository for this scope.
+    pub fn rescues(&self) -> RescueStore<'_> {
+        RescueStore::new(self)
     }
 
     /// Lock the underlying connection. Crate-internal; exposed to sibling

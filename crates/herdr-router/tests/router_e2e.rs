@@ -407,9 +407,9 @@ fn delivery_worker_blocked_backoff_is_recorded() {
 }
 
 #[test]
-fn delivery_worker_blocked_escalates_to_peer_helper() {
-    // A recipient blocked past the escalation delay triggers one peer-assist
-    // prompt to another live agent in the same scope.
+fn delivery_worker_blocked_creates_rescue_job_and_dispatches_helper() {
+    // agent_blocked on delivery → durable rescue job → rescue sweep picks
+    // an eligible peer and sends a [HERDR RESCUE REQUEST] prompt.
     let server = FakeHerdr::start().unwrap();
     let project = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
@@ -440,7 +440,7 @@ fn delivery_worker_blocked_escalates_to_peer_helper() {
         .upsert_agent(&record("ag_helper", "w9:p8", Some("helper")))
         .unwrap();
     pool.messages()
-        .send("ag_sender", "ag_target", "escalation test")
+        .send("ag_sender", "ag_target", "rescue test")
         .unwrap();
 
     server.on("agent.prompt").then(|req| {
@@ -462,24 +462,53 @@ fn delivery_worker_blocked_escalates_to_peer_helper() {
         shutdown,
         Notify::default(),
         Duration::from_millis(10),
-    )
-    .with_blocked_escalate_after(Duration::ZERO);
+    );
     assert_eq!(worker.drain_once().unwrap(), 1);
 
-    let prompts = server.requests_for("agent.prompt");
-    assert_eq!(
-        prompts.len(),
-        2,
-        "delivery + escalation prompts: {prompts:?}"
+    // The blocked delivery ensured a pending rescue job for ag_target.
+    let open = pool.rescues().open_for_source("ag_target").unwrap();
+    assert!(
+        open.is_some(),
+        "rescue job should exist after agent_blocked"
     );
+    assert_eq!(
+        open.as_ref().unwrap().status,
+        herdr_pool_store::RescueStatus::Pending
+    );
+
+    // Rescue sweep: snapshot (agent.read canned) → pick ag_helper →
+    // reserve → dispatch the rescue prompt.
+    worker.sweep_rescue().unwrap();
+
+    let job = pool
+        .rescues()
+        .open_for_source("ag_target")
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.status, herdr_pool_store::RescueStatus::Running);
+    assert_eq!(job.helper_agent_id.as_deref(), Some("ag_helper"));
+
+    let prompts = server.requests_for("agent.prompt");
+    assert_eq!(prompts.len(), 2, "delivery + rescue prompts: {prompts:?}");
     assert_eq!(prompts[0].params["target"], "w9:p9");
     assert_eq!(prompts[1].params["target"], "w9:p8");
-    let assist = prompts[1].params["text"].as_str().unwrap();
-    assert!(assist.contains("rescue assist"), "{assist}");
-    assert!(assist.contains("ag_target"), "{assist}");
+    let rescue = prompts[1].params["text"].as_str().unwrap();
+    assert!(rescue.contains("[HERDR RESCUE REQUEST]"), "{rescue}");
+    assert!(rescue.contains("ag_target"), "{rescue}");
+    assert!(rescue.contains("w9:p9"), "{rescue}");
 
-    // Second drain: message still deferred, no duplicate escalation.
-    assert_eq!(worker.drain_once().unwrap(), 0);
+    // Second sweep while the source is still blocked: no duplicate job,
+    // no second dispatch (helper reservation held by the running job).
+    worker.sweep_rescue().unwrap();
+    assert_eq!(server.requests_for("agent.prompt").len(), 2);
+
+    // Source recovers → next sweep resolves the job.
+    let mut recovered = record("ag_target", "w9:p9", Some("target"));
+    recovered.status = "idle".into();
+    pool.registry().upsert_agent(&recovered).unwrap();
+    worker.sweep_rescue().unwrap();
+    let done = pool.rescues().get(&job.rescue_id).unwrap().unwrap();
+    assert_eq!(done.status, herdr_pool_store::RescueStatus::Resolved);
 }
 
 #[test]

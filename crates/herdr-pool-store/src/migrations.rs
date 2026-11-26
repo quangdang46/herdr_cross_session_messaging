@@ -12,6 +12,7 @@ use rusqlite::Connection;
 use crate::error::{Result, StoreError};
 
 const V1_SQL: &str = include_str!("../migrations/V1__init.sql");
+const V2_SQL: &str = include_str!("../migrations/V2__rescue.sql");
 
 struct Migration {
     version: i64,
@@ -19,10 +20,16 @@ struct Migration {
 }
 
 /// Migrations in application order. Append new entries; never edit applied ones.
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: V1_SQL,
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: V1_SQL,
+    },
+    Migration {
+        version: 2,
+        sql: V2_SQL,
+    },
+];
 
 /// Apply all pending migrations to `conn`. Idempotent.
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {

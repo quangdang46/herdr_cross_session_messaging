@@ -30,6 +30,7 @@ pub mod error;
 pub mod events;
 pub mod pools;
 pub mod registry_sync;
+pub mod rescue;
 
 pub use daemon::{
     clear_stop_sentinel, daemon_status, pid_alive, read_pid_file, remove_pid_file, sigterm,
@@ -41,8 +42,12 @@ pub use delivery::{
     retry_delay, retry_delay_jittered, DeliveryWorker, BACKOFF_BASE, BACKOFF_CAP, BLOCKED_BACKOFF,
     DEAD_NOTIFY_INTERVAL, DEFAULT_POLL_INTERVAL, OFFLINE_DEAD_AFTER,
 };
-pub use envelope::{bootstrap_text, message_envelope, BOOTSTRAP_VERSION, ENVELOPE_PREFIX};
+pub use envelope::{
+    bootstrap_text, message_envelope, rescue_envelope, BOOTSTRAP_VERSION, ENVELOPE_PREFIX,
+    RESCUE_PREFIX,
+};
 pub use error::{Result, RouterError};
 pub use events::{static_subscriptions, subscriptions_for};
 pub use pools::Pools;
 pub use registry_sync::{run_tick, Bootstrapper, Notify, RegistrySync, SyncOutcome};
+pub use rescue::{RescueManager, RESCUE_FALLBACK_LINES, RESCUE_JOB_TIMEOUT, RESCUE_MAX_ATTEMPTS};

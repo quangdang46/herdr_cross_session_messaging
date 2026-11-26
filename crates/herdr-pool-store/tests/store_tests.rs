@@ -62,13 +62,13 @@ fn migrations_apply_once_and_reopen_is_idempotent() {
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0].content, "hello");
 
-    // Schema version is exactly 1 and core tables exist.
+    // Schema version is 2 (V1 schema + V2 rescue_jobs) and core tables exist.
     let conn = Connection::open(store.path()).expect("raw conn");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("user_version");
-    assert_eq!(version, 1);
-    for table in ["agents", "threads", "messages"] {
+    assert_eq!(version, 2);
+    for table in ["agents", "threads", "messages", "rescue_jobs"] {
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
@@ -597,4 +597,173 @@ fn defer_reschedules_without_consuming_attempts() {
     // Defer on terminal states is rejected.
     msgs.mark_delivered(&msg.id).expect("delivered");
     assert!(msgs.defer(&msg.id, None).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// V2: rescue_jobs
+// ---------------------------------------------------------------------------
+
+use herdr_pool_store::RescueStatus;
+
+#[test]
+fn rescue_create_pending_is_idempotent_per_source() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("rescue_scope", &dir);
+    let rescues = store.rescues();
+
+    assert!(rescues
+        .create_pending(
+            "ag_src",
+            Some("w:p1"),
+            Some("tui".into()),
+            Some("visible".into())
+        )
+        .expect("create"));
+    // Second open job for the same source is refused.
+    assert!(!rescues
+        .create_pending("ag_src", Some("w:p1"), None, None)
+        .expect("create dup"));
+    // A different source is fine.
+    assert!(rescues
+        .create_pending("ag_src2", Some("w:p2"), None, None)
+        .expect("create src2"));
+
+    let open = rescues.list_open().expect("list");
+    assert_eq!(open.len(), 2);
+    assert!(open.iter().all(|j| j.status == RescueStatus::Pending));
+    assert_eq!(open[0].snapshot.as_deref(), Some("tui"));
+    assert_eq!(open[0].snapshot_source.as_deref(), Some("visible"));
+}
+
+#[test]
+fn rescue_assign_reserves_helper_and_unassign_releases() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("rescue_assign", &dir);
+    let rescues = store.rescues();
+    rescues
+        .create_pending("ag_src", Some("w:p1"), None, None)
+        .expect("create");
+    let job = rescues
+        .open_for_source("ag_src")
+        .expect("open")
+        .expect("some");
+
+    // Claim for a helper.
+    assert!(rescues
+        .assign(&job.rescue_id, "ag_helper", Some("w:p9"))
+        .expect("assign"));
+    let assigned = rescues.get(&job.rescue_id).expect("get").expect("some");
+    assert_eq!(assigned.status, RescueStatus::Assigned);
+    assert_eq!(assigned.helper_agent_id.as_deref(), Some("ag_helper"));
+    assert_eq!(assigned.attempts, 1);
+    assert!(rescues
+        .open_for_helper("ag_helper")
+        .expect("helper")
+        .is_some());
+
+    // A second job cannot reserve the same helper (unique index).
+    rescues
+        .create_pending("ag_src2", Some("w:p2"), None, None)
+        .expect("create src2");
+    let job2 = rescues
+        .open_for_source("ag_src2")
+        .expect("open")
+        .expect("some");
+    let dup = rescues.assign(&job2.rescue_id, "ag_helper", None);
+    assert!(dup.is_err(), "double-booking a helper must fail");
+
+    // Running → prompt succeeded; unassign only applies to 'assigned'.
+    rescues
+        .set_status(&job.rescue_id, RescueStatus::Running)
+        .expect("running");
+    rescues.unassign(&job.rescue_id).expect("unassign noop");
+    assert_eq!(
+        rescues
+            .get(&job.rescue_id)
+            .expect("get")
+            .expect("some")
+            .status,
+        RescueStatus::Running
+    );
+}
+
+#[test]
+fn rescue_terminal_status_and_open_for_source() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("rescue_terminal", &dir);
+    let rescues = store.rescues();
+    rescues
+        .create_pending("ag_src", Some("w:p1"), None, None)
+        .expect("create");
+    let job = rescues
+        .open_for_source("ag_src")
+        .expect("open")
+        .expect("some");
+
+    rescues
+        .set_status(&job.rescue_id, RescueStatus::Resolved)
+        .expect("resolve");
+    let done = rescues.get(&job.rescue_id).expect("get").expect("some");
+    assert_eq!(done.status, RescueStatus::Resolved);
+    assert!(done.resolved_at.is_some());
+    // Terminal job frees the source for a future blocked episode.
+    assert!(rescues.open_for_source("ag_src").expect("open").is_none());
+    assert!(rescues
+        .create_pending("ag_src", None, None, None)
+        .expect("re-create"));
+}
+
+#[test]
+fn rescue_survives_reopen() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("rescue_persist", &dir);
+    store
+        .rescues()
+        .create_pending(
+            "ag_src",
+            Some("w:p1"),
+            Some("snap".into()),
+            Some("visible".into()),
+        )
+        .expect("create");
+    drop(store);
+
+    // Reopen the same db: the pending job is still there (daemon restart).
+    let store = open_store("rescue_persist", &dir);
+    let open = store.rescues().list_open().expect("list");
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].source_agent_id, "ag_src");
+    assert_eq!(open[0].snapshot.as_deref(), Some("snap"));
+}
+
+#[test]
+fn rescue_update_source_refreshes_pane_and_snapshot() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("rescue_update", &dir);
+    let rescues = store.rescues();
+    rescues
+        .create_pending("ag_src", Some("w:p1"), None, None)
+        .expect("create");
+    let job = rescues
+        .open_for_source("ag_src")
+        .expect("open")
+        .expect("some");
+
+    rescues
+        .update_source(
+            &job.rescue_id,
+            Some("w:p2"),
+            Some("new".into()),
+            Some("visible".into()),
+        )
+        .expect("update");
+    let updated = rescues.get(&job.rescue_id).expect("get").expect("some");
+    assert_eq!(updated.source_pane_id.as_deref(), Some("w:p2"));
+    assert_eq!(updated.snapshot.as_deref(), Some("new"));
+    // COALESCE: None args keep existing values.
+    rescues
+        .update_source(&job.rescue_id, None, None, None)
+        .expect("noop");
+    let same = rescues.get(&job.rescue_id).expect("get").expect("some");
+    assert_eq!(same.source_pane_id.as_deref(), Some("w:p2"));
 }

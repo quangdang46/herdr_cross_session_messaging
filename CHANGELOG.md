@@ -17,12 +17,20 @@ All notable changes to this project are documented here. The format follows
   plugin panes resolves via `HERDR_PLUGIN_CONTEXT_JSON`
   (`workspace_id`/`tab_id`/`focused_pane_id`) when `HERDR_*_ID` vars are
   absent.
-- Blocked-agent rescue (router): on `agent_blocked` the delivery worker
-  defers without consuming attempts, captures a pane snapshot tail into the
-  daemon log, and shows a throttled `notification.show` toast. After
-  `BLOCKED_ESCALATE_AFTER` (5 min) of continuous blocking it prompts another
-  live agent in the scope with the snapshot and queued-mail count — once per
-  blocked episode.
+- Peer TUI rescue (router): when an agent stays `agent_blocked`, a durable
+  `rescue_jobs` row (SQLite, survives daemon restart) captures the source
+  pane's visible TUI and dispatches a `[HERDR RESCUE REQUEST]` prompt to an
+  eligible same-scope peer — idle first, then done, then working; blocked,
+  offline, and already-reserved helpers are never chosen. The helper
+  re-reads the source pane via Herdr (`agent read`/`send-keys`/`wait`) and
+  unblocks it; the pool only detects, snapshots, reserves, dispatches, and
+  verifies. Helper reservations (one rescue per helper) plus a partial
+  unique index per source make rescue loops (A↔B) impossible; jobs with no
+  eligible helper stay `pending`, and jobs open past `RESCUE_JOB_TIMEOUT`
+  (15 min) or `RESCUE_MAX_ATTEMPTS` dispatches escalate to `needs_human`
+  with a `notification.show` toast. On `agent_blocked` the delivery worker
+  still defers without consuming attempts and shows the throttled blocked
+  toast as before.
 - Opt-in delivery toast: `HERDR_POOL_NOTIFY_DELIVERY=1|true|yes` makes the
   daemon `notification.show` on every successful delivery.
 - `MessageStore::defer` — reschedule pending/failed mail without consuming
@@ -87,9 +95,21 @@ All notable changes to this project are documented here. The format follows
   pane has no label, the router sets it to the agent's display name via
   `pane.rename`. User/agent-set labels are never overwritten; once per pane
   per daemon run. `HERDR_POOL_PANE_LABEL=0|false|no|off` disables.
+- `SKILL.md` gains a "Peer rescue" section: helpers receiving
+  `[HERDR RESCUE REQUEST]` re-read the source pane via `herdr agent read`,
+  interact only with the assigned pane via `herdr agent send-keys`/`wait`,
+  verify the source resumed, and never approve destructive actions
+  unprompted. Bootstrap prompt bumped to v2 mentioning rescue. Skill
+  payload version 0.4.0.
 
 ### Changed
 
+- Workspace layout: `bins/herdr-pool-cli` and `bins/herdr-routerd` moved to
+  `crates/` — `bins/` vs `crates/` was only a convention; all Cargo
+  packages now live under `crates/`. Package/binary names, dependencies,
+  and `herdr-plugin.toml` install paths unchanged in behavior.
+- Bootstrap prompt bumped to `BOOTSTRAP_VERSION = 2` (adds a rescue
+  pointer); agents bootstrapped at v1 get re-prompted once.
 - README rewritten for the implemented surface: install paths
   (`herdr plugin link` / `herdr plugin install` / `cargo install --git`),
   `herdr integration install <agent>` guidance, real CLI reference,
