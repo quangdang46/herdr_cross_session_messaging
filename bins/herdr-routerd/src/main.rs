@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use herdr_plugin::paths::state_dir as resolve_state_dir;
+use herdr_plugin::skill::{self, SkillScope};
 use herdr_protocol::HerdrClient;
 use herdr_router::{
     clear_stop_sentinel, daemon_status, pid_alive, read_pid_file, registry_sync::run_tick,
@@ -178,6 +179,40 @@ fn cmd_tick() -> Result<()> {
     Ok(())
 }
 
+/// Best-effort install of the `herdr-messaging` skill into the user's global
+/// agent skill dirs (`~/.agents/skills`, `~/.claude/skills`) so agents pick it
+/// up without a manual `herdr-pool install`. Idempotent and conflict-safe:
+/// user-owned or modified dirs are left untouched and only logged. Runs on
+/// every daemon start so skill payload updates propagate automatically.
+fn ensure_skill_installed() {
+    // `SkillScope::Global` ignores `target_root`; pass an empty path.
+    match skill::install_skill(std::path::Path::new(""), SkillScope::Global) {
+        Ok(outcome) => {
+            for target in &outcome.targets {
+                match target {
+                    skill::TargetOutcome::Installed { path } => {
+                        tracing::info!(path = %path.display(), "skill installed (global)");
+                    }
+                    skill::TargetOutcome::Updated { path } => {
+                        tracing::info!(path = %path.display(), "skill updated (global)");
+                    }
+                    skill::TargetOutcome::Conflict { path, reason } => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            reason = %reason,
+                            "skill install conflict; leaving user-owned dir untouched"
+                        );
+                    }
+                    skill::TargetOutcome::AlreadyInstalled { .. } => {}
+                }
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "global skill install failed; agents may lack the herdr-messaging skill");
+        }
+    }
+}
+
 fn cmd_run() -> Result<()> {
     let state_dir = state_dir()?;
     std::fs::create_dir_all(&state_dir)?;
@@ -185,6 +220,8 @@ fn cmd_run() -> Result<()> {
     let _guard = InstanceGuard::acquire(&state_dir)?;
     clear_stop_sentinel(&state_dir);
     write_pid_file(&state_dir, std::process::id())?;
+
+    ensure_skill_installed();
 
     let config = DaemonConfig::for_state_dir(state_dir.clone());
     let result = Daemon::new(config).and_then(|daemon| daemon.run());
