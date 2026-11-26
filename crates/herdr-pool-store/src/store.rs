@@ -60,17 +60,41 @@ pub(crate) fn new_thread_id() -> String {
     format!("th_{}", uuid::Uuid::now_v7().simple())
 }
 
+/// True when `err` is a transient SQLite lock conflict worth retrying.
+pub(crate) fn is_busy(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(f, _)
+            if matches!(
+                f.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
 /// Apply the standard connection pragmas. Must run before migrations.
 pub(crate) fn configure_connection(conn: &Connection) -> Result<()> {
+    // busy_timeout goes first: switching a brand-new database to WAL needs
+    // an exclusive lock, and racing first-openers (CLI + daemon) would
+    // otherwise get an instant SQLITE_BUSY — the pragma below only takes
+    // effect for statements after it. journal_mode can still report BUSY
+    // immediately in that window, so retry within the same budget.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     // journal_mode returns a row, so use execute_batch (which tolerates it)
     // rather than pragma_update.
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         PRAGMA busy_timeout=5000;
-         PRAGMA foreign_keys=ON;
-         PRAGMA synchronous=NORMAL;",
-    )?;
-    Ok(())
+    loop {
+        match conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA foreign_keys=ON;
+             PRAGMA synchronous=NORMAL;",
+        ) {
+            Err(err) if is_busy(&err) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            result => return result.map_err(StoreError::from),
+        }
+    }
 }
 
 /// Lock a connection mutex, recovering from poisoning. A poisoned mutex means

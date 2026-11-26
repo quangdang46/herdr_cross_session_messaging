@@ -10,6 +10,7 @@
 use rusqlite::Connection;
 
 use crate::error::{Result, StoreError};
+use crate::store::is_busy;
 
 const V1_SQL: &str = include_str!("../migrations/V1__init.sql");
 const V2_SQL: &str = include_str!("../migrations/V2__rescue.sql");
@@ -55,16 +56,9 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         match migrate_once(conn) {
-            Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(err, _)))
-                if matches!(
-                    err.code,
-                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                ) =>
-            {
+            Err(StoreError::Sqlite(err)) if is_busy(&err) => {
                 if std::time::Instant::now() >= deadline {
-                    return Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(
-                        err, None,
-                    )));
+                    return Err(StoreError::Sqlite(err));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }

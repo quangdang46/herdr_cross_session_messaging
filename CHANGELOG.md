@@ -154,7 +154,10 @@ All notable changes to this project are documented here. The format follows
   with "table already exists". Migrations now run inside a `BEGIN
   IMMEDIATE` transaction (version read inside the tx) and retry on
   `SQLITE_BUSY`/`SQLITE_LOCKED` within the busy budget, so concurrent
-  first-opens serialize cleanly.
+  first-opens serialize cleanly. The same race existed one step earlier:
+  `PRAGMA journal_mode=WAL` ran before `busy_timeout` was registered, so
+  racing openers could fail instantly on the WAL switch — the busy timeout
+  is now set via the API first and the pragma batch retries on BUSY too.
 
 ### Changed
 
