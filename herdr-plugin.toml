@@ -11,10 +11,10 @@ platforms = ["linux", "macos"]
 # `herdr-routerd` on PATH (~/.cargo/bin) so startup/actions/panes and the
 # agent-facing skill can all resolve them. Requires a Rust toolchain.
 [[build]]
-command = ["cargo", "install", "--path", "bins/herdr-pool-cli", "--locked"]
+command = ["cargo", "install", "--path", "crates/herdr-pool-cli", "--locked"]
 
 [[build]]
-command = ["cargo", "install", "--path", "bins/herdr-routerd", "--locked"]
+command = ["cargo", "install", "--path", "crates/herdr-routerd", "--locked"]
 
 [[startup]]
 command = ["herdr-routerd", "start"]

@@ -318,14 +318,15 @@ herdr-plugin.toml ──startup──▶ herdr-routerd ──events.subscribe─
 Workspace layout: `crates/herdr-protocol` (NDJSON client + types),
 `crates/herdr-pool-store` (SQLite pools/registry), `crates/herdr-pool-core`
 (scope + registry logic), `crates/herdr-plugin` (manifest, skill installer,
-paths), `crates/herdr-router` (daemon loop + delivery), `bins/` (the two
-binaries), `skills/herdr-messaging/` (agent skill payload).
+paths), `crates/herdr-router` (daemon loop + delivery + rescue),
+`crates/herdr-pool-cli` and `crates/herdr-routerd` (the two binaries),
+`skills/herdr-messaging/` (agent skill payload).
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `herdr-pool: command not found` | CLI not installed / not on PATH | `cargo install --path bins/herdr-pool-cli` or build workspace |
+| `herdr-pool: command not found` | CLI not installed / not on PATH | `cargo install --path crates/herdr-pool-cli` or build workspace |
 | `herdr-routerd is not running` | Daemon never started | `herdr-pool daemon start` (or `herdr-routerd start`); check the plugin `[[startup]]` hook ran |
 | Daemon misbehaving / need logs | — | `herdr-pool daemon logs` prints `<state>/logs/routerd.log` path + recent lines |
 | `doctor` fails a check | Env / socket / scope / DB / daemon / skill issue | Run `herdr-pool doctor --json`; each check reports `{name, status, detail}` |

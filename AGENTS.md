@@ -11,8 +11,8 @@ Herdr. See `docs/IMPLEMENTATION_PLAN.md` for the full design and `br list` /
 - `crates/herdr-pool-core` — scope resolution + peer registry logic
 - `crates/herdr-plugin` — herdr-plugin.toml model, skill installer, paths
 - `crates/herdr-router` — daemon: event loop, registry sync, delivery worker
-- `bins/herdr-pool-cli` — `herdr-pool` agent-facing CLI
-- `bins/herdr-routerd` — router daemon binary
+- `crates/herdr-pool-cli` — `herdr-pool` agent-facing CLI
+- `crates/herdr-routerd` — router daemon binary
 - `skills/herdr-messaging/` — agent skill payload (SKILL.md)
 - `.tmp/` — local reference clones (gitignored): herdr source, herdr-auto-title
 - `herdr-api.schema.json`, `research/` — API contract artifacts (generated)
@@ -31,7 +31,7 @@ cargo fmt --check
 - Sync only: `std::os::unix::net::UnixStream` + threads. No tokio/async.
 - One socket connection per request; only `events.subscribe`/`events.wait`/
   `agent.wait`/`agent.prompt`+wait/`pane.wait_for_output` hold a connection.
-- Crate errors: thiserror in libs; anyhow in bins. `tracing` for logs
+- Crate errors: thiserror in libs; anyhow in binaries. `tracing` for logs
   (`RUST_LOG`/`HERDR_LOG`).
 - Beads: `br ready`, `br dep cycles` must stay empty. Claim with
   `br update <id> --claim --actor <name>`; close with proof in `--reason`.

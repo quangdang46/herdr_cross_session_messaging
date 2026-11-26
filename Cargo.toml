@@ -7,8 +7,8 @@ members = [
     "crates/herdr-pool-store",
     "crates/herdr-plugin",
     "crates/herdr-router",
-    "bins/herdr-pool-cli",
-    "bins/herdr-routerd",
+    "crates/herdr-pool-cli",
+    "crates/herdr-routerd",
 ]
 
 [workspace.package]

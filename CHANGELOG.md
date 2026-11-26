@@ -27,7 +27,7 @@ All notable changes to this project are documented here. The format follows
   daemon `notification.show` on every successful delivery.
 - `MessageStore::defer` — reschedule pending/failed mail without consuming
   delivery attempts (used for `agent_blocked`).
-- `herdr-pool` agent CLI (`bins/herdr-pool-cli`): `whoami`, `peers`, `send`,
+- `herdr-pool` agent CLI (`crates/herdr-pool-cli`): `whoami`, `peers`, `send`,
   `broadcast`, `inbox` (+`inbox read`, `--follow`), `reply`, `threads`,
   `message read|get`, `daemon start|stop|status|logs`, `doctor`, `install`,
   `uninstall`, `version`. Global flags `--json`, `--socket-path`,
