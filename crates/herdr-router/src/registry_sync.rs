@@ -673,6 +673,21 @@ impl<'a> Bootstrapper<'a> {
                     tracing::info!(agent = %record.agent_id, "bootstrap prompt delivered");
                 }
             }
+            Err(err) if err.is_agent_blocked() || err.is_agent_not_ready() => {
+                // Rejected before anything was sent — do not burn the
+                // per-run budget, or an agent first seen while blocked
+                // would never get bootstrapped after it unblocks.
+                if used == 0 {
+                    self.attempts.remove(&record.agent_id);
+                } else {
+                    self.attempts.insert(record.agent_id.clone(), used);
+                }
+                tracing::debug!(
+                    agent = %record.agent_id,
+                    error = %err,
+                    "bootstrap prompt deferred (agent not promptable)"
+                );
+            }
             Err(err) => {
                 tracing::debug!(
                     agent = %record.agent_id,

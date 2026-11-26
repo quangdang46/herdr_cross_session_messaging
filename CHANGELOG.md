@@ -67,6 +67,9 @@ All notable changes to this project are documented here. The format follows
   payload content changed without a `SKILL_VERSION` bump (previously
   reported `already_installed` and left stale files). `doctor` reports such
   targets as `outdated`.
+- Bootstrap prompt budget no longer burns on `agent_blocked`/
+  `agent_not_ready` rejections — an agent first seen while blocked can
+  still be bootstrapped after it unblocks, within the same daemon run.
 
 ### Changed
 

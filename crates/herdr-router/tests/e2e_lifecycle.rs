@@ -777,3 +777,81 @@ fn agent_detected_bootstraps_once_and_version_bump_rebootstraps() {
     handle.shutdown();
     handle.join();
 }
+
+// ---------------------------------------------------------------------------
+// agent_blocked bootstrap rejections must not exhaust the attempt budget
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bootstrap_blocked_rejections_do_not_exhaust_attempt_budget() {
+    let server = FakeHerdr::start().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let cwd = project.path();
+
+    server
+        .on("session.snapshot")
+        .respond(snapshot_result(vec![]));
+    // The agent only ever reports `blocked` until we flip it to idle.
+    script_agent_get(
+        &server,
+        vec![(
+            "w1:p1".into(),
+            agent_info(agent_json("w1:p1", "term_a", cwd, "blocked")),
+        )],
+    );
+    // Every bootstrap prompt is rejected while the agent is blocked; once it
+    // goes idle the next prompt falls through to the canned success.
+    for _ in 0..3 {
+        server.fail_next("agent.prompt", "agent_blocked", "agent is busy");
+    }
+
+    let daemon = Arc::new(Daemon::new(test_config(state.path(), server.socket_path())).unwrap());
+    let handle = daemon.spawn().unwrap();
+    assert!(wait_until(WAIT, "events.subscribe", || {
+        !server.requests_for("events.subscribe").is_empty()
+    }));
+
+    // Three sightings while blocked → three rejected bootstrap attempts.
+    // Under the old accounting these burned the whole per-run budget.
+    for _ in 0..3 {
+        let prompts_before = server.requests_for("agent.prompt").len();
+        server.push_event(agent_detected_event("w1:p1"));
+        assert!(
+            wait_until(WAIT, "blocked bootstrap attempt", || {
+                server.requests_for("agent.prompt").len() > prompts_before
+            }),
+            "blocked agent detection did not produce a bootstrap attempt"
+        );
+    }
+    let pool = || only_pool(&daemon);
+    let agent_id = live_agent(&pool()).agent_id.clone();
+    assert_eq!(
+        pool()
+            .registry()
+            .get_agent(&agent_id)
+            .unwrap()
+            .map(|r| r.bootstrap_version)
+            .unwrap_or(None),
+        None,
+        "blocked rejections must not mark the agent bootstrapped"
+    );
+
+    // Agent unblocks → the next bootstrap attempt must still be allowed.
+    server.push_subscription_event(status_event("w1:p1", "idle"));
+    assert!(
+        wait_until(WAIT, "bootstrap after unblock", || {
+            pool()
+                .registry()
+                .get_agent(&agent_id)
+                .ok()
+                .flatten()
+                .and_then(|r| r.bootstrap_version)
+                .is_some()
+        }),
+        "bootstrap was not retried after the agent went idle"
+    );
+
+    handle.shutdown();
+    handle.join();
+}
