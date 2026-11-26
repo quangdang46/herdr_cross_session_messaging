@@ -33,9 +33,9 @@
 //! them into `events.subscribe` and reconnects when the set changes
 //! ([`RegistrySync::subscriptions_changed`]).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use herdr_pool_core::{resolve_scope_for_agent, ResolvedScope};
@@ -55,6 +55,22 @@ pub(crate) fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Automatic pane labeling is on by default; `HERDR_POOL_PANE_LABEL` set to
+/// `0`/`false`/`no`/`off` (any case) disables it. Resolved once per process.
+fn pane_label_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("HERDR_POOL_PANE_LABEL")
+            .map(|v| {
+                !matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off"
+                )
+            })
+            .unwrap_or(true)
+    })
 }
 
 /// Status-change nudges for the delivery worker.
@@ -107,6 +123,9 @@ pub struct RegistrySync<'a> {
     /// Whether any agent transitioned to a promptable state recently —
     /// surfaced so the event loop can nudge the delivery worker.
     delivery_nudge: bool,
+    /// Pane ids already checked for auto-labeling this run — bounds the
+    /// extra `pane.get` calls to once per pane per daemon run.
+    label_checked: HashSet<String>,
 }
 
 impl<'a> RegistrySync<'a> {
@@ -118,6 +137,7 @@ impl<'a> RegistrySync<'a> {
             watched: BTreeSet::new(),
             subs_dirty: false,
             delivery_nudge: false,
+            label_checked: HashSet::new(),
         }
     }
 
@@ -483,8 +503,13 @@ impl<'a> RegistrySync<'a> {
         let record = self.merge_record(&pool, agent, &resolved)?;
         self.retire_foreign_scope_records(agent, &pool);
         let registry = pool.registry();
-        let is_new = registry.get_agent(&record.agent_id)?.is_none();
+        let previous = registry.get_agent(&record.agent_id)?;
+        let pane_changed = previous
+            .as_ref()
+            .and_then(|p| p.pane_id.as_deref())
+            .is_some_and(|old| Some(old) != record.pane_id.as_deref());
         registry.upsert_agent(&record)?;
+        let is_new = previous.is_none();
         if is_new {
             tracing::info!(
                 agent = %record.agent_id,
@@ -496,7 +521,53 @@ impl<'a> RegistrySync<'a> {
         }
         self.delivery_nudge = true;
         self.bootstrap.maybe_attempt(&pool, &record);
+        if is_new || pane_changed {
+            self.ensure_pane_label(agent, &record);
+        }
         Ok(())
+    }
+
+    /// Label the agent's pane with its display name when the pane has no
+    /// label yet — never overwrites a user- or agent-set label, and only
+    /// runs once per pane per daemon run ([`Self::label_checked`]).
+    /// `HERDR_POOL_PANE_LABEL=0|false|no|off` disables this entirely.
+    fn ensure_pane_label(&mut self, agent: &AgentInfo, record: &AgentRecord) {
+        if !pane_label_enabled() {
+            return;
+        }
+        let Some(pane_id) = record.pane_id.clone().filter(|p| !p.is_empty()) else {
+            return;
+        };
+        if !self.label_checked.insert(pane_id.clone()) {
+            return;
+        }
+        let pane = match self.client.pane_get(&pane_id) {
+            Ok(pane) => pane,
+            Err(err) => {
+                tracing::debug!(pane = %pane_id, error = %err, "pane.get for label check failed");
+                return;
+            }
+        };
+        if pane.label.as_deref().is_some_and(|l| !l.trim().is_empty()) {
+            return;
+        }
+        let label = agent
+            .name
+            .clone()
+            .or_else(|| agent.display_agent.clone())
+            .or_else(|| agent.agent.clone())
+            .filter(|l| !l.trim().is_empty());
+        let Some(label) = label else {
+            return;
+        };
+        match self.client.pane_rename(&pane_id, Some(&label)) {
+            Ok(_) => {
+                tracing::info!(pane = %pane_id, label = %label, "pane auto-labeled");
+            }
+            Err(err) => {
+                tracing::debug!(pane = %pane_id, error = %err, "pane.rename failed");
+            }
+        }
     }
 
     /// An agent belongs to exactly one scope. When its resolved scope

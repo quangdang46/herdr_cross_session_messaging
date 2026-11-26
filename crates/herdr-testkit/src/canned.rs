@@ -71,7 +71,7 @@ pub(crate) fn default_for(method: &str, params: &Value) -> Responder {
         "agent.view.set" | "agent.view.clear" => Responder::Result(canned("agent_view")),
         "pane.list" => Responder::Result(canned("pane_list")),
         "pane.current" => Responder::Result(canned("pane_current")),
-        "pane.get" => Responder::Result(canned("pane_info")),
+        "pane.get" | "pane.rename" => Responder::Result(canned("pane_info")),
         "pane.process_info" => Responder::Result(canned("pane_process_info")),
         "pane.send_text"
         | "pane.send_keys"

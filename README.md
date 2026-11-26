@@ -353,10 +353,14 @@ binaries), `skills/herdr-messaging/` (agent skill payload).
 - **Rescue assists, doesn't fix** — on `agent_blocked` the daemon defers mail,
   snapshots the pane tail, toasts the user, and after 5 min asks a peer to
   check on the stuck agent. It never sends keys or approves permissions.
-- **Scope = pane launch cwd** by default — agents launched in a subdirectory
-  get their own scope. Set `HERDR_POOL_SCOPE_MODE=git` to scope by the nearest
-  git toplevel instead, so subdirectories of one repo share a pool (agents
-  outside any repo still scope by launch cwd).
+- **Scope = pane launch cwd** by default — agents launched in a
+  subdirectory get their own scope. Set `HERDR_POOL_SCOPE_MODE=git` to scope
+  by the nearest git toplevel instead, so subdirectories of one repo share a
+  pool (agents outside any repo still scope by launch cwd).
+- **Pane auto-label fills empty labels only** — on registration (and pane
+  moves) the daemon sets the pane label to the agent's name when the pane
+  has none; user- or agent-set labels are never overwritten. Disable with
+  `HERDR_POOL_PANE_LABEL=0`.
 
 ## FAQ
 

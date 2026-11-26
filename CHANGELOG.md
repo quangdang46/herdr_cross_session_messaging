@@ -83,6 +83,10 @@ All notable changes to this project are documented here. The format follows
 - `SKILL.md` anti-pattern no longer claims broadcast does not exist (the CLI
   ships `herdr-pool broadcast`); it now restricts broadcast to explicit
   user-requested all-peer notifications. Skill payload version 0.3.0.
+- Automatic pane labeling: when a newly registered agent's (or moved pane's)
+  pane has no label, the router sets it to the agent's display name via
+  `pane.rename`. User/agent-set labels are never overwritten; once per pane
+  per daemon run. `HERDR_POOL_PANE_LABEL=0|false|no|off` disables.
 
 ### Changed
 
