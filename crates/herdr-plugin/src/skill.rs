@@ -20,7 +20,7 @@ use crate::error::{PluginError, Result};
 pub const SKILL_NAME: &str = "herdr-messaging";
 
 /// Skill payload version. Keep in sync with the crate version.
-pub const SKILL_VERSION: &str = "0.2.0";
+pub const SKILL_VERSION: &str = "0.3.0";
 
 /// Marker file written into installed skill dirs to record ownership.
 pub const MANAGED_MARKER: &str = ".herdr-messaging-managed";
@@ -732,6 +732,41 @@ mod tests {
         assert!(home
             .join(".claude/skills/herdr-messaging/SKILL.md")
             .is_file());
+    }
+
+    #[test]
+    fn payload_covers_every_source_file() {
+        // skills/herdr-messaging/ is the single source of truth; PAYLOAD must
+        // embed every file in it (and nothing else) so installs can't drift.
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/herdr-messaging");
+        let mut on_disk = Vec::new();
+        collect_rel_files(&src, &src, &mut on_disk);
+        on_disk.sort();
+
+        let mut embedded: Vec<&str> = PAYLOAD.iter().map(|f| f.rel_path).collect();
+        embedded.sort_unstable();
+        assert_eq!(on_disk, embedded);
+
+        for file in PAYLOAD {
+            let disk = fs::read_to_string(src.join(file.rel_path)).unwrap();
+            assert_eq!(disk, file.contents, "payload drift for {}", file.rel_path);
+        }
+    }
+
+    fn collect_rel_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect_rel_files(root, &path, out);
+            } else {
+                out.push(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
     }
 
     #[test]
