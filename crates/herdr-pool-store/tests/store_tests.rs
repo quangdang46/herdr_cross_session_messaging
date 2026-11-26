@@ -768,3 +768,104 @@ fn rescue_update_source_refreshes_pane_and_snapshot() {
     let same = rescues.get(&job.rescue_id).expect("get").expect("some");
     assert_eq!(same.source_pane_id.as_deref(), Some("w:p2"));
 }
+
+#[test]
+fn rescue_helper_report_transitions_and_validates_helper() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("rescue_report", &dir);
+    let rescues = store.rescues();
+    rescues
+        .create_pending("ag_src", Some("w:p1"), None, None)
+        .expect("create");
+    let job = rescues
+        .open_for_source("ag_src")
+        .expect("open")
+        .expect("some");
+    rescues
+        .assign(&job.rescue_id, "ag_helper", Some("w:p9"))
+        .expect("assign");
+    rescues
+        .set_status(&job.rescue_id, RescueStatus::Running)
+        .expect("running");
+
+    // A non-helper cannot report.
+    assert!(rescues
+        .helper_report(
+            &job.rescue_id,
+            "ag_intruder",
+            herdr_pool_store::HelperReport::Done
+        )
+        .is_err());
+
+    // Helper reports done → verifying.
+    let reported = rescues
+        .helper_report(
+            &job.rescue_id,
+            "ag_helper",
+            herdr_pool_store::HelperReport::Done,
+        )
+        .expect("report done");
+    assert_eq!(reported.status, RescueStatus::Verifying);
+    // Idempotent: reporting done again while verifying is fine.
+    let again = rescues
+        .helper_report(
+            &job.rescue_id,
+            "ag_helper",
+            herdr_pool_store::HelperReport::Done,
+        )
+        .expect("report done again");
+    assert_eq!(again.status, RescueStatus::Verifying);
+
+    // needs-human from verifying → terminal.
+    let nh = rescues
+        .helper_report(
+            &job.rescue_id,
+            "ag_helper",
+            herdr_pool_store::HelperReport::NeedsHuman,
+        )
+        .expect("report needs-human");
+    assert_eq!(nh.status, RescueStatus::NeedsHuman);
+    assert!(nh.resolved_at.is_some());
+    // Terminal job rejects further reports.
+    assert!(rescues
+        .helper_report(
+            &job.rescue_id,
+            "ag_helper",
+            herdr_pool_store::HelperReport::Done
+        )
+        .is_err());
+}
+
+#[test]
+fn rescue_helper_report_needs_human_from_running() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("rescue_report_nh", &dir);
+    let rescues = store.rescues();
+    rescues
+        .create_pending("ag_src", Some("w:p1"), None, None)
+        .expect("create");
+    let job = rescues
+        .open_for_source("ag_src")
+        .expect("open")
+        .expect("some");
+    rescues
+        .assign(&job.rescue_id, "ag_helper", None)
+        .expect("assign");
+    // 'done' is not accepted while still 'assigned' (prompt may not have landed).
+    assert!(rescues
+        .helper_report(
+            &job.rescue_id,
+            "ag_helper",
+            herdr_pool_store::HelperReport::Done
+        )
+        .is_err());
+    // But needs-human is — the helper may fail before ever running.
+    let nh = rescues
+        .helper_report(
+            &job.rescue_id,
+            "ag_helper",
+            herdr_pool_store::HelperReport::NeedsHuman,
+        )
+        .expect("report needs-human");
+    assert_eq!(nh.status, RescueStatus::NeedsHuman);
+}

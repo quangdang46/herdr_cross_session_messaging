@@ -52,5 +52,5 @@ pub use pools::Pools;
 pub use registry_sync::{run_tick, Bootstrapper, Notify, RegistrySync, SyncOutcome};
 pub use rescue::{
     RescueManager, RESCUE_ASSIGNED_STALE, RESCUE_FALLBACK_LINES, RESCUE_JOB_TIMEOUT,
-    RESCUE_MAX_ATTEMPTS,
+    RESCUE_MAX_ATTEMPTS, RESCUE_VERIFY_TIMEOUT,
 };

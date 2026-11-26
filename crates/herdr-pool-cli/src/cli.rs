@@ -150,8 +150,25 @@ pub enum Command {
         project: Option<PathBuf>,
     },
 
+    /// Report the outcome of an assigned peer rescue (`rs_*` id).
+    Rescue {
+        /// Rescue job id from the `[HERDR RESCUE REQUEST]` prompt.
+        id: String,
+        /// `done` — you resolved the source; `needs-human` — you cannot.
+        outcome: RescueOutcome,
+    },
+
     /// Print version information.
     Version,
+}
+
+/// Outcome a rescue helper reports via `herdr-pool rescue`.
+#[derive(clap::ValueEnum, Clone, Debug)]
+pub enum RescueOutcome {
+    /// Source agent resumed — job moves to `verifying`.
+    Done,
+    /// Cannot resolve safely — escalate to a human now.
+    NeedsHuman,
 }
 
 #[derive(Subcommand)]

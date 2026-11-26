@@ -72,6 +72,16 @@ impl RescueStatus {
     }
 }
 
+/// What the assigned helper reports back through `herdr-pool rescue`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperReport {
+    /// Helper finished its interactions; the monitor now verifies the
+    /// source actually left `blocked` (→ `verifying`).
+    Done,
+    /// Helper cannot resolve this safely — escalate to a human now.
+    NeedsHuman,
+}
+
 /// A row from the `rescue_jobs` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RescueJob {
@@ -296,6 +306,54 @@ impl<'a> RescueStore<'a> {
             params![now_millis(), rescue_id],
         )?;
         Ok(())
+    }
+
+    /// Record the assigned helper's report.
+    ///
+    /// Only the agent named in `helper_agent_id` may report — anyone else
+    /// gets [`StoreError::Invalid`]. `Done` moves `running`/`assigned` →
+    /// `verifying` (idempotent when already verifying); `NeedsHuman` moves
+    /// any helper-held open status → `needs_human`. Terminal jobs and
+    /// jobs without a helper reservation reject reports.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
+    pub fn helper_report(
+        &self,
+        rescue_id: &str,
+        reporter_agent_id: &str,
+        report: HelperReport,
+    ) -> Result<RescueJob> {
+        let job = self
+            .get(rescue_id)?
+            .ok_or_else(|| StoreError::NotFound(format!("rescue job '{rescue_id}'")))?;
+        if job.helper_agent_id.as_deref() != Some(reporter_agent_id) {
+            return Err(StoreError::Invalid(format!(
+                "agent '{reporter_agent_id}' is not the helper for rescue '{rescue_id}'"
+            )));
+        }
+        match report {
+            HelperReport::Done => {
+                if !matches!(job.status, RescueStatus::Running | RescueStatus::Verifying) {
+                    return Err(StoreError::Invalid(format!(
+                        "rescue '{rescue_id}' is {:?}, not awaiting helper report",
+                        job.status
+                    )));
+                }
+                if job.status == RescueStatus::Running {
+                    self.set_status(rescue_id, RescueStatus::Verifying)?;
+                }
+            }
+            HelperReport::NeedsHuman => {
+                if !job.status.is_open() {
+                    return Err(StoreError::Invalid(format!(
+                        "rescue '{rescue_id}' is already {:?}",
+                        job.status
+                    )));
+                }
+                self.set_status(rescue_id, RescueStatus::NeedsHuman)?;
+            }
+        }
+        self.get(rescue_id)?
+            .ok_or_else(|| StoreError::NotFound(format!("rescue job '{rescue_id}'")))
     }
 
     /// Transition a job to a new status. Terminal statuses stamp

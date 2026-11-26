@@ -35,6 +35,12 @@ All notable changes to this project are documented here. The format follows
   rescues get distinct helpers), and `assigned` rows stale past
   `RESCUE_ASSIGNED_STALE` (60s — the crash window between reserve and
   prompt) return to `pending` for redispatch.
+- `herdr-pool rescue <rs-id> done|needs-human` — the assigned helper reports
+  its outcome back to the pool: `done` moves the job to `verifying` (the
+  monitor still requires the source to actually leave `blocked`, with a
+  120s `RESCUE_VERIFY_TIMEOUT` grace before `needs_human`), `needs-human`
+  escalates immediately with a `notification.show` toast. Only the
+  assigned helper may report; the rescue prompt now carries the `rs_*` id.
 - Opt-in delivery toast: `HERDR_POOL_NOTIFY_DELIVERY=1|true|yes` makes the
   daemon `notification.show` on every successful delivery.
 - `MessageStore::defer` — reschedule pending/failed mail without consuming

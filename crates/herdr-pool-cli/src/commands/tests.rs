@@ -401,3 +401,110 @@ fn threads_summarizes_conversations() {
     let threads = pool.pool.messages().threads().unwrap();
     assert_eq!(threads.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// rescue
+// ---------------------------------------------------------------------------
+
+/// Seed a running rescue job where `self` (w1:p1) is the assigned helper for
+/// the peer agent, returning the job id.
+fn seed_running_rescue(pool: &herdr_pool_core::PoolContext) -> String {
+    let peer_id = peer_agent_id(pool);
+    let self_id = self_agent_id(pool);
+    let rescues = pool.pool.rescues();
+    rescues
+        .create_pending(
+            &peer_id,
+            Some("w1:p2"),
+            Some("tui".into()),
+            Some("visible".into()),
+        )
+        .unwrap();
+    let job = rescues.open_for_source(&peer_id).unwrap().unwrap();
+    rescues
+        .assign(&job.rescue_id, &self_id, Some("w1:p1"))
+        .unwrap();
+    rescues
+        .set_status(&job.rescue_id, herdr_pool_store::RescueStatus::Running)
+        .unwrap();
+    job.rescue_id
+}
+
+#[test]
+fn rescue_done_moves_job_to_verifying() {
+    let f = Fixture::new();
+    f.script_two_agents();
+    let ctx = f.ctx();
+
+    let rescue_id = {
+        with_env!(f, "w1:p1", |env| whoami::run(&ctx, env)).unwrap();
+        with_env!(f, "w1:p2", |env| whoami::run(&ctx, env)).unwrap();
+        let pool = open_pool(f.state.path(), f.project.path()).unwrap();
+        seed_running_rescue(&pool)
+    };
+
+    with_env!(f, "w1:p1", |env| crate::commands::rescue::run(
+        &ctx,
+        env,
+        &rescue_id,
+        &crate::cli::RescueOutcome::Done,
+    ))
+    .unwrap();
+
+    let pool = open_pool(f.state.path(), f.project.path()).unwrap();
+    let job = pool.pool.rescues().get(&rescue_id).unwrap().unwrap();
+    assert_eq!(job.status, herdr_pool_store::RescueStatus::Verifying);
+}
+
+#[test]
+fn rescue_needs_human_escalates_and_toasts() {
+    let f = Fixture::new();
+    f.script_two_agents();
+    let ctx = f.ctx();
+
+    let rescue_id = {
+        with_env!(f, "w1:p1", |env| whoami::run(&ctx, env)).unwrap();
+        with_env!(f, "w1:p2", |env| whoami::run(&ctx, env)).unwrap();
+        let pool = open_pool(f.state.path(), f.project.path()).unwrap();
+        seed_running_rescue(&pool)
+    };
+
+    with_env!(f, "w1:p1", |env| crate::commands::rescue::run(
+        &ctx,
+        env,
+        &rescue_id,
+        &crate::cli::RescueOutcome::NeedsHuman,
+    ))
+    .unwrap();
+
+    let pool = open_pool(f.state.path(), f.project.path()).unwrap();
+    let job = pool.pool.rescues().get(&rescue_id).unwrap().unwrap();
+    assert_eq!(job.status, herdr_pool_store::RescueStatus::NeedsHuman);
+    assert!(
+        !f.server.requests_for("notification.show").is_empty(),
+        "needs-human report should toast the user"
+    );
+}
+
+#[test]
+fn rescue_report_from_non_helper_is_rejected() {
+    let f = Fixture::new();
+    f.script_two_agents();
+    let ctx = f.ctx();
+
+    let rescue_id = {
+        with_env!(f, "w1:p1", |env| whoami::run(&ctx, env)).unwrap();
+        with_env!(f, "w1:p2", |env| whoami::run(&ctx, env)).unwrap();
+        let pool = open_pool(f.state.path(), f.project.path()).unwrap();
+        seed_running_rescue(&pool)
+    };
+
+    // The peer (source agent) is not the assigned helper → error.
+    let result = with_env!(f, "w1:p2", |env| crate::commands::rescue::run(
+        &ctx,
+        env,
+        &rescue_id,
+        &crate::cli::RescueOutcome::Done,
+    ));
+    assert!(result.is_err());
+}

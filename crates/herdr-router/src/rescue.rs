@@ -54,6 +54,10 @@ pub const RESCUE_MAX_ATTEMPTS: u32 = 5;
 /// daemon crash; 60s is far longer than that window yet short enough to
 /// recover quickly.
 pub const RESCUE_ASSIGNED_STALE: Duration = Duration::from_secs(60);
+/// Grace period after a helper reports `done` (`verifying`) during which
+/// the monitor waits for the source to actually leave `blocked`. Past this,
+/// the helper's claim didn't hold → `needs_human`.
+pub const RESCUE_VERIFY_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Rescue coordinator: detection, snapshotting, helper selection,
 /// reservation, dispatch, monitoring, and expiry across all scope pools.
@@ -254,6 +258,20 @@ impl RescueManager {
                 self.finish(pool, job, RescueStatus::Failed, "source agent gone");
                 return Ok(());
             }
+        }
+
+        // Verifying grace: the helper reported `done` but the source is
+        // still blocked — its claim didn't hold.
+        if job.status == RescueStatus::Verifying
+            && now.saturating_sub(job.updated_at) > RESCUE_VERIFY_TIMEOUT.as_millis() as i64
+        {
+            self.finish(
+                pool,
+                job,
+                RescueStatus::NeedsHuman,
+                "helper reported done but source still blocked",
+            );
+            return Ok(());
         }
 
         if job.status != RescueStatus::Pending {

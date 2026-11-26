@@ -93,6 +93,7 @@ pub fn rescue_envelope(job: &RescueJob, source: &AgentRecord) -> String {
         job.scope_key.as_str()
     };
     let source_agent = source.agent_id.as_str();
+    let rescue_id = job.rescue_id.as_str();
     let snapshot = job.snapshot.as_deref().unwrap_or("(snapshot unavailable)");
     let snapshot_source = job.snapshot_source.as_deref().unwrap_or("unknown");
     let pane = job
@@ -105,6 +106,7 @@ pub fn rescue_envelope(job: &RescueJob, source: &AgentRecord) -> String {
          You are helping another coding agent that is blocked.\n\
          \n\
          SOURCE:\n\
+         - Rescue ID: {rescue_id}\n\
          - Agent ID: {source_agent}\n\
          - Pane ID: {pane}\n\
          - Project scope: {scope}\n\
@@ -125,6 +127,9 @@ pub fn rescue_envelope(job: &RescueJob, source: &AgentRecord) -> String {
          6. Read the source pane again after each interaction.\n\
          7. Verify that the source agent has resumed (`herdr agent wait\n\
          \x20  {pane} --until idle` or a fresh `agent read`).\n\
+         8. Report the outcome: `herdr-pool rescue {rescue_id} done` when the\n\
+         \x20  source resumed, or `herdr-pool rescue {rescue_id} needs-human`\n\
+         \x20  when you cannot resolve it safely.\n\
          \n\
          If you cannot determine a safe response:\n\
          - Do not guess.\n\

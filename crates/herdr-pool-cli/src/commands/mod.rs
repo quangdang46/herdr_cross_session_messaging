@@ -10,6 +10,7 @@ pub mod install;
 pub mod message;
 pub mod peers;
 pub mod reply;
+pub mod rescue;
 pub mod send;
 pub mod threads;
 pub mod version;
