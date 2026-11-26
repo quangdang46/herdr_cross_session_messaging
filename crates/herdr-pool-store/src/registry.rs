@@ -52,6 +52,12 @@ pub struct AgentRecord {
     /// Herdr agent status (`idle`, `working`, `blocked`, `done`, `unknown`)
     /// or [`STATUS_OFFLINE`].
     pub status: String,
+    /// Herdr `interactive_ready`: the agent TUI accepts prompts. `false`
+    /// while the session is still launching/resuming (e.g. `--resume`) —
+    /// the bootstrapper must wait for `true` before prompting.
+    pub interactive_ready: bool,
+    /// Herdr `launch_pending`: the agent launch is still in flight.
+    pub launch_pending: bool,
     /// Bootstrap prompt version already delivered to this agent, if any.
     pub bootstrap_version: Option<u32>,
     /// First registration (unix millis).
@@ -73,6 +79,8 @@ fn agent_from_row(row: &Row<'_>) -> rusqlite::Result<AgentRecord> {
         name: row.get("name")?,
         cwd: row.get("cwd")?,
         status: row.get("status")?,
+        interactive_ready: row.get::<_, i64>("interactive_ready")? != 0,
+        launch_pending: row.get::<_, i64>("launch_pending")? != 0,
         bootstrap_version: bootstrap.and_then(|v| u32::try_from(v).ok()),
         first_seen_at: row.get("first_seen_at")?,
         last_seen_at: row.get("last_seen_at")?,
@@ -81,7 +89,8 @@ fn agent_from_row(row: &Row<'_>) -> rusqlite::Result<AgentRecord> {
 }
 
 const AGENT_COLUMNS: &str = "agent_id, scope_key, terminal_id, pane_id, agent_kind, name, \
-     cwd, status, bootstrap_version, first_seen_at, last_seen_at, offline_at";
+     cwd, status, interactive_ready, launch_pending, bootstrap_version, \
+     first_seen_at, last_seen_at, offline_at";
 
 /// Scoped repository over the `agents` table of one pool db.
 pub struct RegistryStore<'a> {
@@ -104,19 +113,22 @@ impl<'a> RegistryStore<'a> {
         conn.execute(
             "INSERT INTO agents \
              (agent_id, scope_key, terminal_id, pane_id, agent_kind, name, cwd, status, \
-              bootstrap_version, first_seen_at, last_seen_at, offline_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+              interactive_ready, launch_pending, bootstrap_version, \
+              first_seen_at, last_seen_at, offline_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
              ON CONFLICT(agent_id) DO UPDATE SET \
-               scope_key         = excluded.scope_key, \
-               terminal_id       = excluded.terminal_id, \
-               pane_id           = excluded.pane_id, \
-               agent_kind        = excluded.agent_kind, \
-               name              = excluded.name, \
-               cwd               = excluded.cwd, \
-               status            = excluded.status, \
-               bootstrap_version = excluded.bootstrap_version, \
-               last_seen_at      = excluded.last_seen_at, \
-               offline_at        = excluded.offline_at",
+               scope_key           = excluded.scope_key, \
+               terminal_id         = excluded.terminal_id, \
+               pane_id             = excluded.pane_id, \
+               agent_kind          = excluded.agent_kind, \
+               name                = excluded.name, \
+               cwd                 = excluded.cwd, \
+               status              = excluded.status, \
+               interactive_ready   = excluded.interactive_ready, \
+               launch_pending      = excluded.launch_pending, \
+               bootstrap_version   = excluded.bootstrap_version, \
+               last_seen_at        = excluded.last_seen_at, \
+               offline_at          = excluded.offline_at",
             params![
                 agent.agent_id,
                 agent.scope_key,
@@ -126,6 +138,8 @@ impl<'a> RegistryStore<'a> {
                 agent.name,
                 agent.cwd,
                 agent.status,
+                i64::from(agent.interactive_ready),
+                i64::from(agent.launch_pending),
                 agent.bootstrap_version.map(|v| v as i64),
                 agent.first_seen_at,
                 agent.last_seen_at,

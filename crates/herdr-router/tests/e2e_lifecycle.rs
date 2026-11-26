@@ -19,7 +19,7 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -209,6 +209,27 @@ fn status_event(pane: &str, status: &str) -> Value {
     })
 }
 
+fn pane_updated_event(pane: &str, term: &str, cwd: &std::path::Path) -> Value {
+    let ws = pane.split(':').next().unwrap_or("w1");
+    json!({
+        "event": "pane_updated",
+        "data": {
+            "type": "pane_updated",
+            "pane": {
+                "pane_id": pane,
+                "workspace_id": ws,
+                "tab_id": format!("{ws}:t1"),
+                "terminal_id": term,
+                "agent_status": "idle",
+                "revision": 2,
+                "focused": false,
+                "cwd": cwd.to_string_lossy(),
+                "foreground_cwd": cwd.to_string_lossy(),
+            },
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // pane.moved → stable agent_id, re-keyed pane_id, delivery still works
 // ---------------------------------------------------------------------------
@@ -334,6 +355,8 @@ fn delivery_falls_back_to_current_pane_id() {
             name: None,
             cwd: None,
             status: "idle".into(),
+            interactive_ready: true,
+            launch_pending: false,
             bootstrap_version: None,
             first_seen_at: 0,
             last_seen_at: 0,
@@ -858,6 +881,106 @@ fn bootstrap_blocked_rejections_do_not_exhaust_attempt_budget() {
         }),
         "bootstrap was not retried after the agent went idle"
     );
+
+    handle.shutdown();
+    handle.join();
+}
+
+// ---------------------------------------------------------------------------
+// bootstrap waits for interactive_ready (e.g. `devin --resume`)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bootstrap_waits_for_interactive_ready() {
+    // An agent detected while its TUI is still resuming reports
+    // `interactive_ready: false` (status may already be `idle` — idle does
+    // NOT imply promptable). The bootstrap prompt must be deferred until a
+    // later AgentInfo sighting reports readiness, then sent exactly once.
+    let server = FakeHerdr::start().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let cwd = project.path().to_path_buf();
+
+    server
+        .on("session.snapshot")
+        .respond(snapshot_result(vec![]));
+
+    // agent.get resolves readiness from a live flag the test flips.
+    let ready = Arc::new(AtomicBool::new(false));
+    for _ in 0..24 {
+        let ready = Arc::clone(&ready);
+        let cwd = cwd.clone();
+        server.on("agent.get").then(move |req| {
+            let target = req
+                .params
+                .get("target")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if target != "w1:p1" && target != "term_a" {
+                return HandlerReply::Error {
+                    code: "agent_not_found".into(),
+                    message: format!("no agent for target {target}"),
+                };
+            }
+            let mut agent = agent_json("w1:p1", "term_a", &cwd, "idle");
+            agent["interactive_ready"] = json!(ready.load(Ordering::SeqCst));
+            agent["launch_pending"] = json!(!ready.load(Ordering::SeqCst));
+            HandlerReply::Result(agent_info(agent))
+        });
+    }
+
+    let daemon = Arc::new(Daemon::new(test_config(state.path(), server.socket_path())).unwrap());
+    let handle = daemon.spawn().unwrap();
+    assert!(wait_until(WAIT, "events.subscribe", || {
+        !server.requests_for("events.subscribe").is_empty()
+    }));
+
+    // Detection while still resuming: agent.get is consulted, the record
+    // is registered as not-ready, and NO bootstrap prompt is sent.
+    server.push_event(agent_detected_event("w1:p1"));
+    assert!(
+        wait_until(WAIT, "not-ready detection processed", || {
+            !server.requests_for("agent.get").is_empty()
+        }),
+        "agent_detected did not trigger agent.get"
+    );
+    // Let any (incorrect) prompt arrive, then assert none did.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        bootstrap_prompts(&server),
+        0,
+        "bootstrap must not fire while interactive_ready=false"
+    );
+    let pool = || only_pool(&daemon);
+    let record = live_agent(&pool());
+    assert!(!record.interactive_ready, "readiness must persist");
+    assert!(record.launch_pending);
+
+    // The new pane joined the watched set → the daemon resubscribes;
+    // pushing before that settles can drop the frame on the floor.
+    assert!(
+        wait_until(WAIT, "resubscribe after detection", || {
+            server.requests_for("events.subscribe").len() >= 2
+        }),
+        "daemon did not resubscribe after agent detection"
+    );
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Resume finishes → pane.updated refreshes AgentInfo → ready → the
+    // bootstrap prompt goes out exactly once.
+    ready.store(true, Ordering::SeqCst);
+    server.push_event(pane_updated_event("w1:p1", "term_a", &cwd));
+    assert!(
+        wait_until(WAIT, "bootstrap after ready", || {
+            bootstrap_prompts(&server) == 1
+        }),
+        "bootstrap was not sent once interactive_ready flipped true"
+    );
+
+    // Further sightings do not re-bootstrap (version persisted).
+    server.push_event(pane_updated_event("w1:p1", "term_a", &cwd));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(bootstrap_prompts(&server), 1);
 
     handle.shutdown();
     handle.join();

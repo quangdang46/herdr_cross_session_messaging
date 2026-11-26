@@ -131,6 +131,16 @@ All notable changes to this project are documented here. The format follows
   verify the source resumed, and never approve destructive actions
   unprompted. Bootstrap prompt bumped to v2 mentioning rescue. Skill
   payload version 0.4.0.
+- Bootstrap no longer fires the moment Herdr detects an agent: `agent.prompt`
+  could paste the instruction into a TUI that is still launching or
+  restoring a session (e.g. `devin --resume`). The router now stores Herdr's
+  `interactive_ready`/`launch_pending` flags on the agent record (migration
+  V5) and the bootstrapper waits until the agent reports interactive-ready —
+  detection alone (`idle` status included) is not sufficient. Status-change
+  events carry no readiness fields, so a promptable transition for a
+  not-yet-ready agent triggers a fresh `agent.get`; readiness flips are also
+  picked up by the periodic `agent.list` reconcile. Older Herdr servers that
+  omit `interactive_ready` are treated as ready (previous behavior).
 
 ### Changed
 

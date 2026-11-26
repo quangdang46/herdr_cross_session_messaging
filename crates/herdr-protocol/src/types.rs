@@ -323,6 +323,12 @@ pub type MetadataMap = HashMap<String, String>;
 /// Environment overrides for spawned panes/tabs/workspaces.
 pub type EnvMap = HashMap<String, serde_json::Value>;
 
+/// Serde default for [`AgentInfo::interactive_ready`]: an older server
+/// that omits the field is assumed ready (pre-readiness behavior).
+fn default_interactive_ready() -> bool {
+    true
+}
+
 /// A live coding agent known to the Herdr server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentInfo {
@@ -345,7 +351,10 @@ pub struct AgentInfo {
     pub foreground_cwd: Option<String>,
     #[serde(default)]
     pub display_agent: Option<String>,
-    #[serde(default)]
+    /// Whether the agent TUI accepts interactive input. Absent on older
+    /// Herdr servers — treated as ready so bootstrap/delivery keep working
+    /// there; an explicit `false` is the "still launching/resuming" signal.
+    #[serde(default = "default_interactive_ready")]
     pub interactive_ready: bool,
     #[serde(default)]
     pub launch_pending: bool,

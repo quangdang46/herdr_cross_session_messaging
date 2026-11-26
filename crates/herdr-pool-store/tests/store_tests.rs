@@ -31,6 +31,8 @@ fn agent(scope: &str, name: &str) -> AgentRecord {
         name: Some(name.to_string()),
         cwd: Some("/tmp/project".to_string()),
         status: "idle".to_string(),
+        interactive_ready: true,
+        launch_pending: false,
         bootstrap_version: None,
         first_seen_at: now,
         last_seen_at: now,
@@ -62,13 +64,13 @@ fn migrations_apply_once_and_reopen_is_idempotent() {
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0].content, "hello");
 
-    // Schema version is 3 (V1 schema + V2 rescue_jobs + V3 captured_at)
-    // and core tables exist.
+    // Schema version is 5 (V1 schema + V2 rescue_jobs + V3 captured_at +
+    // V4 dispatch_token + V5 agent readiness) and core tables exist.
     let conn = Connection::open(store.path()).expect("raw conn");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("user_version");
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     for table in ["agents", "threads", "messages", "rescue_jobs"] {
         let exists: bool = conn
             .query_row(
@@ -406,6 +408,42 @@ fn registry_upsert_is_idempotent() {
     assert_eq!(got.status, "working");
     assert_eq!(got.first_seen_at, rec.first_seen_at);
     assert_eq!(got.last_seen_at, rec.last_seen_at + 5000);
+}
+
+#[test]
+fn registry_readiness_fields_round_trip() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("scope-ready", &dir);
+    let reg = store.registry();
+
+    // A launching/resuming agent: not interactive-ready, launch pending.
+    let mut rec = agent("scope-ready", "resume-me");
+    rec.interactive_ready = false;
+    rec.launch_pending = true;
+    reg.upsert_agent(&rec).expect("upsert");
+    let got = reg.get_agent(&rec.agent_id).expect("get").expect("some");
+    assert!(!got.interactive_ready);
+    assert!(got.launch_pending);
+
+    // Readiness flips → next upsert overwrites both fields.
+    let mut ready = rec.clone();
+    ready.interactive_ready = true;
+    ready.launch_pending = false;
+    reg.upsert_agent(&ready).expect("upsert2");
+    let got = reg.get_agent(&rec.agent_id).expect("get").expect("some");
+    assert!(got.interactive_ready);
+    assert!(!got.launch_pending);
+
+    // Persists across reopen.
+    drop(store);
+    let store = open_store("scope-ready", &dir);
+    let got = store
+        .registry()
+        .get_agent(&rec.agent_id)
+        .expect("get")
+        .expect("some");
+    assert!(got.interactive_ready);
+    assert!(!got.launch_pending);
 }
 
 #[test]

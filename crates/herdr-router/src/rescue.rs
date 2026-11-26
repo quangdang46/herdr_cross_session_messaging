@@ -561,10 +561,12 @@ fn helper_rank(status: &str) -> Option<u8> {
 ///
 /// Excludes: the source itself, offline agents (already filtered by
 /// `list_agents(false)` but re-checked), blocked/unknown-status agents,
-/// agents with no Herdr target, helpers already holding a reservation
-/// (`reserved`), and helpers whose dispatch already failed for this job
-/// (`failed`). Deterministic: status rank, then agent_id — never the
-/// raw `list_agents` order.
+/// agents whose TUI is not interactive-ready or still launching (the
+/// rescue prompt would land in a half-restored session), agents with no
+/// Herdr target, helpers already holding a reservation (`reserved`), and
+/// helpers whose dispatch already failed for this job (`failed`).
+/// Deterministic: status rank, then agent_id — never the raw
+/// `list_agents` order.
 fn pick_helper<'a>(
     agents: &'a [AgentRecord],
     source_agent_id: &str,
@@ -575,6 +577,7 @@ fn pick_helper<'a>(
         .iter()
         .filter(|a| a.agent_id != source_agent_id)
         .filter(|a| a.status != STATUS_OFFLINE)
+        .filter(|a| a.interactive_ready && !a.launch_pending)
         .filter(|a| !reserved.contains(&a.agent_id))
         .filter(|a| !failed.contains(&a.agent_id))
         .filter(|a| herdr_target(a).is_some())
@@ -598,6 +601,8 @@ mod tests {
             name: None,
             cwd: None,
             status: status.into(),
+            interactive_ready: true,
+            launch_pending: false,
             bootstrap_version: None,
             first_seen_at: 0,
             last_seen_at: 0,
@@ -667,6 +672,24 @@ mod tests {
         let failed = HashSet::new();
         assert!(pick_helper(&agents, "ag_a", &reserved, &failed).is_none());
         assert!(pick_helper(&agents, "ag_b", &reserved, &failed).is_none());
+    }
+
+    #[test]
+    fn pick_helper_skips_not_ready_agents() {
+        // A helper whose TUI is still launching/resuming cannot receive the
+        // rescue prompt — it is skipped even when idle.
+        let agents = vec![
+            agent("ag_resuming", "idle"),
+            agent("ag_pending", "idle"),
+            agent("ag_ready", "idle"),
+        ];
+        let mut agents = agents;
+        agents[0].interactive_ready = false;
+        agents[1].launch_pending = true;
+        let reserved = HashSet::new();
+        let failed = HashSet::new();
+        let pick = pick_helper(&agents, "ag_src", &reserved, &failed).unwrap();
+        assert_eq!(pick.agent_id, "ag_ready");
     }
 
     #[test]

@@ -481,8 +481,18 @@ impl<'a> RegistrySync<'a> {
                 );
                 if matches!(status, AgentStatus::Idle | AgentStatus::Working) {
                     self.delivery_nudge = true;
-                    // A promptable transition is also the bootstrap retry point.
-                    self.bootstrap.maybe_attempt(&pool, &record);
+                    // A promptable transition is also the bootstrap retry
+                    // point. Status events carry no readiness fields, so an
+                    // agent still flagged not-ready gets a fresh agent.get
+                    // — that is the only way to observe interactive_ready
+                    // flipping true (e.g. `devin --resume` finishing).
+                    let needs_bootstrap = record.bootstrap_version.unwrap_or(0) < BOOTSTRAP_VERSION;
+                    let not_ready = !record.interactive_ready || record.launch_pending;
+                    if needs_bootstrap && not_ready {
+                        self.refresh_agent_by_pane(pane_id)?;
+                    } else {
+                        self.bootstrap.maybe_attempt(&pool, &record);
+                    }
                 }
             }
         }
@@ -655,6 +665,8 @@ impl<'a> RegistrySync<'a> {
             name: agent.name.clone(),
             cwd: Some(resolved.canonical_path.to_string_lossy().into_owned()),
             status: agent.agent_status.as_str().to_string(),
+            interactive_ready: agent.interactive_ready,
+            launch_pending: agent.launch_pending,
             bootstrap_version: existing.as_ref().and_then(|e| e.bootstrap_version),
             first_seen_at: existing.map(|e| e.first_seen_at).unwrap_or(now),
             last_seen_at: now,
@@ -715,12 +727,27 @@ impl<'a> Bootstrapper<'a> {
     /// (`bootstrap_version < BOOTSTRAP_VERSION`). Cheap no-op otherwise.
     /// Errors are logged and swallowed — bootstrap must never break the
     /// registry sync path.
+    ///
+    /// Readiness gate: an agent Herdr reports as `!interactive_ready` or
+    /// `launch_pending` (still launching, or mid `--resume`) is skipped
+    /// *without* consuming an attempt — `agent.prompt` there could paste
+    /// the instruction into a half-restored TUI. The next AgentInfo
+    /// sighting (agent.get/list refresh, status change) re-evaluates.
     pub fn maybe_attempt(&mut self, pool: &Arc<PoolStore>, record: &AgentRecord) {
         if record.status == STATUS_OFFLINE {
             return;
         }
         let current = record.bootstrap_version.unwrap_or(0);
         if current >= BOOTSTRAP_VERSION {
+            return;
+        }
+        if !record.interactive_ready || record.launch_pending {
+            tracing::debug!(
+                agent = %record.agent_id,
+                interactive_ready = record.interactive_ready,
+                launch_pending = record.launch_pending,
+                "bootstrap deferred: agent not interactive-ready"
+            );
             return;
         }
         let used = self.attempts.get(&record.agent_id).copied().unwrap_or(0);

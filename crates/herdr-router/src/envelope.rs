@@ -189,6 +189,8 @@ mod tests {
             name: None,
             cwd: None,
             status: "idle".into(),
+            interactive_ready: true,
+            launch_pending: false,
             bootstrap_version: None,
             first_seen_at: 0,
             last_seen_at: 0,

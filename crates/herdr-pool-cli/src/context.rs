@@ -245,6 +245,8 @@ pub fn record_for_agent(
         name: agent.name.clone(),
         cwd: Some(resolved.canonical_path.to_string_lossy().into_owned()),
         status: agent.agent_status.as_str().to_string(),
+        interactive_ready: agent.interactive_ready,
+        launch_pending: agent.launch_pending,
         bootstrap_version: existing.as_ref().and_then(|e| e.bootstrap_version),
         first_seen_at: existing.map(|e| e.first_seen_at).unwrap_or(now),
         last_seen_at: now,
@@ -301,6 +303,8 @@ pub fn upsert_self(pool: &PoolContext, identity: &SelfIdentity) -> CmdResult<Age
             name: agent.name.clone(),
             cwd: Some(pool.canonical_path.to_string_lossy().into_owned()),
             status: agent.agent_status.as_str().to_string(),
+            interactive_ready: agent.interactive_ready,
+            launch_pending: agent.launch_pending,
             bootstrap_version: existing.as_ref().and_then(|e| e.bootstrap_version),
             first_seen_at: existing.map(|e| e.first_seen_at).unwrap_or(now),
             last_seen_at: now,
@@ -320,6 +324,13 @@ pub fn upsert_self(pool: &PoolContext, identity: &SelfIdentity) -> CmdResult<Age
                 name: pane.label.clone(),
                 cwd: Some(pool.canonical_path.to_string_lossy().into_owned()),
                 status: pane.agent_status.as_str().to_string(),
+                // Plain panes carry no agent readiness — preserve any
+                // stored values, defaulting to ready (no launch pending).
+                interactive_ready: existing
+                    .as_ref()
+                    .map(|e| e.interactive_ready)
+                    .unwrap_or(true),
+                launch_pending: existing.as_ref().map(|e| e.launch_pending).unwrap_or(false),
                 bootstrap_version: existing.as_ref().and_then(|e| e.bootstrap_version),
                 first_seen_at: existing.map(|e| e.first_seen_at).unwrap_or(now),
                 last_seen_at: now,
