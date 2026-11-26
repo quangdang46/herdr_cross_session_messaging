@@ -106,6 +106,11 @@ pub struct RescueJob {
     pub captured_at: Option<i64>,
     /// Lifecycle status.
     pub status: RescueStatus,
+    /// Fencing token minted on each `assign` (`dt_<uuidv7>`). The dispatch
+    /// prompt carries it; `claim`/report calls must echo it, so a helper
+    /// fenced out by a re-dispatch (ambiguous prompt outcome) cannot act
+    /// or report on the job. `None` only on rows assigned before V4.
+    pub dispatch_token: Option<String>,
     /// Dispatch/assignment attempts used.
     pub attempts: u32,
     /// Job creation (unix millis).
@@ -119,6 +124,11 @@ pub struct RescueJob {
 /// Generate a fresh rescue id: `rs_<uuidv7 hex>`.
 pub fn new_rescue_id() -> String {
     format!("rs_{}", uuid::Uuid::now_v7().simple())
+}
+
+/// Generate a fresh dispatch fencing token: `dt_<uuidv7 hex>`.
+fn new_dispatch_token() -> String {
+    format!("dt_{}", uuid::Uuid::now_v7().simple())
 }
 
 fn rescue_from_row(row: &Row<'_>) -> rusqlite::Result<RescueJob> {
@@ -135,6 +145,7 @@ fn rescue_from_row(row: &Row<'_>) -> rusqlite::Result<RescueJob> {
         snapshot_source: row.get("snapshot_source")?,
         captured_at: row.get("captured_at")?,
         status: RescueStatus::parse(&status),
+        dispatch_token: row.get("dispatch_token")?,
         attempts: u32::try_from(attempts).unwrap_or(u32::MAX),
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -144,7 +155,7 @@ fn rescue_from_row(row: &Row<'_>) -> rusqlite::Result<RescueJob> {
 
 const RESCUE_COLUMNS: &str = "rescue_id, scope_key, source_agent_id, source_pane_id, \
      helper_agent_id, helper_pane_id, snapshot, snapshot_source, captured_at, status, \
-     attempts, created_at, updated_at, resolved_at";
+     dispatch_token, attempts, created_at, updated_at, resolved_at";
 
 /// Scoped repository over the `rescue_jobs` table of one pool db.
 pub struct RescueStore<'a> {
@@ -290,26 +301,37 @@ impl<'a> RescueStore<'a> {
 
     /// Claim a pending job for `helper_agent_id`/`helper_pane_id`.
     ///
-    /// Atomic `UPDATE ... WHERE status = 'pending'`: returns `false` when
-    /// the job is no longer pending (another dispatcher won, or it was
-    /// resolved meanwhile). The helper-reservation unique index may still
-    /// reject the update if the helper is already held — surfaced as
-    /// [`StoreError::Sqlite`]; callers should treat that like `false`.
+    /// Atomic `UPDATE ... WHERE status = 'pending'`: returns `Ok(None)`
+    /// when the job is no longer pending (another dispatcher won, or it was
+    /// resolved meanwhile). On success returns the freshly minted
+    /// `dispatch_token` (`dt_...`) that the dispatch prompt must carry —
+    /// it fences this assignment against later re-dispatches. The
+    /// helper-reservation unique index may still reject the update if the
+    /// helper is already held — surfaced as [`StoreError::Sqlite`]; callers
+    /// should treat that like `None`.
     #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn assign(
         &self,
         rescue_id: &str,
         helper_agent_id: &str,
         helper_pane_id: Option<&str>,
-    ) -> Result<bool> {
+    ) -> Result<Option<String>> {
+        let token = new_dispatch_token();
         let conn = self.pool.conn();
         let changed = conn.execute(
             "UPDATE rescue_jobs SET status = 'assigned', helper_agent_id = ?1, \
-             helper_pane_id = ?2, attempts = attempts + 1, updated_at = ?3 \
-             WHERE rescue_id = ?4 AND status = 'pending'",
-            params![helper_agent_id, helper_pane_id, now_millis(), rescue_id],
+             helper_pane_id = ?2, dispatch_token = ?3, attempts = attempts + 1, \
+             updated_at = ?4 \
+             WHERE rescue_id = ?5 AND status = 'pending'",
+            params![
+                helper_agent_id,
+                helper_pane_id,
+                token,
+                now_millis(),
+                rescue_id
+            ],
         )?;
-        Ok(changed == 1)
+        Ok((changed == 1).then_some(token))
     }
 
     /// Release a job back to `pending` (helper prompt failed before the
@@ -327,28 +349,98 @@ impl<'a> RescueStore<'a> {
         Ok(())
     }
 
+    /// The assigned helper confirms receipt of its dispatch prompt.
+    ///
+    /// This is the fencing checkpoint: the helper must call this (via
+    /// `herdr-pool rescue <id> claim <token>`) *before* touching the
+    /// source pane. Validation, in order:
+    ///
+    /// - reporter must be the job's `helper_agent_id`;
+    /// - `token` must equal the job's `dispatch_token` — a helper fenced
+    ///   out by a re-dispatch holds a stale token and is rejected, which
+    ///   is what stops two helpers from both working one source pane;
+    ///   rows with `dispatch_token = NULL` (pre-V4) skip the token check;
+    /// - status must be `assigned` or `running` (`assigned` transitions
+    ///   to `running` — the helper acknowledged the prompt landed).
+    ///
+    /// Fails with [`StoreError::NotFound`] for unknown ids and
+    /// [`StoreError::Invalid`] for every validation failure.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
+    pub fn claim(
+        &self,
+        rescue_id: &str,
+        reporter_agent_id: &str,
+        token: &str,
+    ) -> Result<RescueJob> {
+        let job = self
+            .get(rescue_id)?
+            .ok_or_else(|| StoreError::NotFound(format!("rescue job '{rescue_id}'")))?;
+        Self::check_helper(&job, reporter_agent_id)?;
+        Self::check_token(&job, Some(token))?;
+        match job.status {
+            RescueStatus::Assigned | RescueStatus::Running => {
+                if job.status == RescueStatus::Assigned {
+                    self.set_status(rescue_id, RescueStatus::Running)?;
+                }
+            }
+            other => {
+                return Err(StoreError::Invalid(format!(
+                    "rescue '{rescue_id}' is {other:?}, not awaiting helper claim"
+                )));
+            }
+        }
+        self.get(rescue_id)?
+            .ok_or_else(|| StoreError::NotFound(format!("rescue job '{rescue_id}'")))
+    }
+
+    /// Shared helper-identity check for `claim`/`helper_report`.
+    fn check_helper(job: &RescueJob, reporter_agent_id: &str) -> Result<()> {
+        if job.helper_agent_id.as_deref() != Some(reporter_agent_id) {
+            return Err(StoreError::Invalid(format!(
+                "agent '{reporter_agent_id}' is not the helper for rescue '{}'",
+                job.rescue_id
+            )));
+        }
+        Ok(())
+    }
+
+    /// Shared fencing-token check. `None` token on the job (pre-V4 row)
+    /// skips validation; a tokened job rejects missing/mismatched tokens.
+    fn check_token(job: &RescueJob, token: Option<&str>) -> Result<()> {
+        if let Some(expected) = job.dispatch_token.as_deref() {
+            if token != Some(expected) {
+                return Err(StoreError::Invalid(format!(
+                    "dispatch token missing or stale for rescue '{}' — \
+                     the rescue was reassigned; stand down",
+                    job.rescue_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Record the assigned helper's report.
     ///
     /// Only the agent named in `helper_agent_id` may report — anyone else
-    /// gets [`StoreError::Invalid`]. `Done` moves `running` → `verifying`
-    /// (idempotent when already verifying); `NeedsHuman` moves any
-    /// helper-held open status → `needs_human`. Terminal jobs and jobs
-    /// without a helper reservation reject reports.
+    /// gets [`StoreError::Invalid`]. When the job carries a
+    /// `dispatch_token`, `token` must match it (fencing: a helper
+    /// reassigned away cannot close the job). `Done` moves `running` →
+    /// `verifying` (idempotent when already verifying); `NeedsHuman`
+    /// moves any helper-held open status → `needs_human`. Terminal jobs
+    /// and jobs without a helper reservation reject reports.
     #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn helper_report(
         &self,
         rescue_id: &str,
         reporter_agent_id: &str,
+        token: Option<&str>,
         report: HelperReport,
     ) -> Result<RescueJob> {
         let job = self
             .get(rescue_id)?
             .ok_or_else(|| StoreError::NotFound(format!("rescue job '{rescue_id}'")))?;
-        if job.helper_agent_id.as_deref() != Some(reporter_agent_id) {
-            return Err(StoreError::Invalid(format!(
-                "agent '{reporter_agent_id}' is not the helper for rescue '{rescue_id}'"
-            )));
-        }
+        Self::check_helper(&job, reporter_agent_id)?;
+        Self::check_token(&job, token)?;
         match report {
             HelperReport::Done => {
                 if !matches!(job.status, RescueStatus::Running | RescueStatus::Verifying) {

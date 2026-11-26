@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use herdr_pool_store::{AgentRecord, PoolStore, RescueJob, RescueStatus, STATUS_OFFLINE};
 use herdr_protocol::{
-    AgentReadParams, HerdrClient, NotificationShowParams, ReadOptions, ReadSource,
+    AgentReadParams, HerdrClient, HerdrError, NotificationShowParams, ReadOptions, ReadSource,
 };
 
 use crate::envelope::rescue_envelope;
@@ -83,6 +83,10 @@ pub struct RescueManager {
     /// new attempt. In-memory only — a restart simply forgets the mute,
     /// costing at most one extra job cycle per stuck agent.
     seen_unblocked_at: Mutex<HashMap<String, i64>>,
+    /// Age after which a persisted `assigned` row is treated as
+    /// crashed-between-assign-and-prompt (or an ambiguous dispatch whose
+    /// helper never claimed) and returned to `pending`.
+    assigned_stale: Duration,
 }
 
 impl RescueManager {
@@ -94,6 +98,7 @@ impl RescueManager {
             max_attempts: RESCUE_MAX_ATTEMPTS,
             failed_helpers: Mutex::new(HashMap::new()),
             seen_unblocked_at: Mutex::new(HashMap::new()),
+            assigned_stale: RESCUE_ASSIGNED_STALE,
         }
     }
 
@@ -105,6 +110,11 @@ impl RescueManager {
     /// Override the dispatch-attempt cap (tests).
     pub fn set_max_attempts(&mut self, max: u32) {
         self.max_attempts = max;
+    }
+
+    /// Override the stale-`assigned` threshold (tests).
+    pub fn set_assigned_stale(&mut self, stale: Duration) {
+        self.assigned_stale = stale;
     }
 
     /// Ensure an open rescue job exists for `source` (a blocked agent).
@@ -267,7 +277,7 @@ impl RescueManager {
         // RESCUE_ASSIGNED_STALE means the daemon died mid-dispatch (or the
         // prompt result was lost). Return it to pending for redispatch.
         if job.status == RescueStatus::Assigned
-            && now.saturating_sub(job.updated_at) > RESCUE_ASSIGNED_STALE.as_millis() as i64
+            && now.saturating_sub(job.updated_at) > self.assigned_stale.as_millis() as i64
         {
             tracing::info!(
                 rescue = %job.rescue_id,
@@ -369,22 +379,25 @@ impl RescueManager {
 
         // Reserve first: the UPDATE is atomic on status='pending', and the
         // helper unique index rejects double-booking. A lost race just
-        // means another dispatcher got there first.
+        // means another dispatcher got there first. `assign` also mints
+        // the dispatch fencing token carried by the prompt.
         let rescues = pool.rescues();
-        match rescues.assign(&job.rescue_id, &helper.agent_id, helper.pane_id.as_deref()) {
-            Ok(true) => {}
-            Ok(false) => return Ok(()),
-            Err(err) => {
-                tracing::debug!(rescue = %job.rescue_id, error = %err, "rescue assign failed");
-                return Ok(());
-            }
-        }
+        let token =
+            match rescues.assign(&job.rescue_id, &helper.agent_id, helper.pane_id.as_deref()) {
+                Ok(Some(token)) => token,
+                Ok(None) => return Ok(()),
+                Err(err) => {
+                    tracing::debug!(rescue = %job.rescue_id, error = %err, "rescue assign failed");
+                    return Ok(());
+                }
+            };
 
-        // Rebuild the job view with the reservation for the prompt.
+        // Rebuild the job view with the reservation + token for the prompt.
         let mut prompt_job = job.clone();
         prompt_job.status = RescueStatus::Assigned;
         prompt_job.helper_agent_id = Some(helper.agent_id.clone());
         prompt_job.helper_pane_id = helper.pane_id.clone();
+        prompt_job.dispatch_token = Some(token);
         let text = rescue_envelope(&prompt_job, source);
 
         match self.client.agent_prompt(&helper_target, &text, None) {
@@ -400,8 +413,26 @@ impl RescueManager {
                     "rescue dispatched to peer helper"
                 );
             }
+            Err(err) if dispatch_outcome_ambiguous(&err) => {
+                // At-least-once hazard: the prompt may have reached Herdr
+                // (and the helper) even though we saw an error. Do NOT
+                // unassign — that would let a second helper be dispatched
+                // while the first may already be working the pane. Keep
+                // the reservation; if the helper really got the prompt it
+                // claims/reports with this token, otherwise the stale-
+                // assigned recovery returns the job to pending and the
+                // NEXT assign mints a fresh token that fences this helper
+                // out of claim/report.
+                tracing::warn!(
+                    rescue = %job.rescue_id,
+                    helper = %helper.agent_id,
+                    error = %err,
+                    "rescue dispatch outcome ambiguous; holding assignment"
+                );
+            }
             Err(err) => {
-                // Helper rejected/vanished mid-dispatch: release the
+                // Definitive rejection (agent_blocked, not_found, ...):
+                // the prompt certainly did not land. Release the
                 // reservation so another helper (or a later sweep) can try,
                 // and exclude this helper for the job — the registry status
                 // may still look eligible until the blocked event lands.
@@ -485,6 +516,21 @@ impl RescueManager {
             Err(_) => (None, None),
         }
     }
+}
+
+/// Whether an `agent_prompt` failure leaves the delivery outcome
+/// *ambiguous* — the request may have reached Herdr and the helper even
+/// though no response came back (timeout, dropped connection, malformed
+/// reply, daemon crash mid-flight). For these the job must keep its
+/// assignment so the fencing token stays valid for a helper that did
+/// receive the prompt; definitive API rejections (`agent_blocked`,
+/// `agent_not_found`, ...) prove nothing was sent and release instead.
+fn dispatch_outcome_ambiguous(err: &HerdrError) -> bool {
+    err.is_timeout()
+        || matches!(
+            err,
+            HerdrError::Closed | HerdrError::Transport(_) | HerdrError::Protocol(_)
+        )
 }
 
 /// Herdr-facing target for a registry record: pane id first (kept current

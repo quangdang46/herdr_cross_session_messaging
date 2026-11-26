@@ -154,21 +154,34 @@ pub enum Command {
     Rescue {
         /// Rescue job id from the `[HERDR RESCUE REQUEST]` prompt.
         id: String,
-        /// `done` — you resolved the source; `needs-human` — you cannot.
-        outcome: RescueOutcome,
+        /// What to report for this rescue job.
+        #[command(subcommand)]
+        action: RescueAction,
     },
 
     /// Print version information.
     Version,
 }
 
-/// Outcome a rescue helper reports via `herdr-pool rescue`.
-#[derive(clap::ValueEnum, Clone, Debug)]
-pub enum RescueOutcome {
+/// Action a rescue helper reports via `herdr-pool rescue <id> <action>`.
+#[derive(clap::Subcommand, Clone, Debug)]
+pub enum RescueAction {
+    /// Confirm you are still the assigned helper before touching the
+    /// source pane. Fails when the rescue was reassigned — then STOP.
+    Claim {
+        /// Dispatch token (`dt_*`) from the rescue prompt.
+        token: String,
+    },
     /// Source agent resumed — job moves to `verifying`.
-    Done,
+    Done {
+        /// Dispatch token (`dt_*`) from the rescue prompt.
+        token: Option<String>,
+    },
     /// Cannot resolve safely — escalate to a human now.
-    NeedsHuman,
+    NeedsHuman {
+        /// Dispatch token (`dt_*`) from the rescue prompt.
+        token: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

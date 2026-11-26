@@ -126,10 +126,17 @@ impl DeliveryWorker {
         }
     }
 
-    /// Override the rescue job timeout / attempt cap (tests).
-    pub fn with_rescue_timeouts(mut self, job_timeout: Duration, max_attempts: u32) -> Self {
+    /// Override the rescue job timeout / attempt cap / stale-assigned
+    /// threshold (tests).
+    pub fn with_rescue_timeouts(
+        mut self,
+        job_timeout: Duration,
+        max_attempts: u32,
+        assigned_stale: Duration,
+    ) -> Self {
         self.rescue.set_job_timeout(job_timeout);
         self.rescue.set_max_attempts(max_attempts);
+        self.rescue.set_assigned_stale(assigned_stale);
         self
     }
 

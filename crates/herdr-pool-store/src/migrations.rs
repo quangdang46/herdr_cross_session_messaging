@@ -14,6 +14,7 @@ use crate::error::{Result, StoreError};
 const V1_SQL: &str = include_str!("../migrations/V1__init.sql");
 const V2_SQL: &str = include_str!("../migrations/V2__rescue.sql");
 const V3_SQL: &str = include_str!("../migrations/V3__rescue_captured_at.sql");
+const V4_SQL: &str = include_str!("../migrations/V4__rescue_dispatch_token.sql");
 
 struct Migration {
     version: i64,
@@ -33,6 +34,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 3,
         sql: V3_SQL,
+    },
+    Migration {
+        version: 4,
+        sql: V4_SQL,
     },
 ];
 

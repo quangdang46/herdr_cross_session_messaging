@@ -68,7 +68,7 @@ fn migrations_apply_once_and_reopen_is_idempotent() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("user_version");
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     for table in ["agents", "threads", "messages", "rescue_jobs"] {
         let exists: bool = conn
             .query_row(
@@ -649,13 +649,16 @@ fn rescue_assign_reserves_helper_and_unassign_releases() {
         .expect("open")
         .expect("some");
 
-    // Claim for a helper.
-    assert!(rescues
+    // Claim for a helper; assign returns the dispatch fencing token.
+    let token = rescues
         .assign(&job.rescue_id, "ag_helper", Some("w:p9"))
-        .expect("assign"));
+        .expect("assign")
+        .expect("token");
+    assert!(token.starts_with("dt_"));
     let assigned = rescues.get(&job.rescue_id).expect("get").expect("some");
     assert_eq!(assigned.status, RescueStatus::Assigned);
     assert_eq!(assigned.helper_agent_id.as_deref(), Some("ag_helper"));
+    assert_eq!(assigned.dispatch_token.as_deref(), Some(token.as_str()));
     assert_eq!(assigned.attempts, 1);
     assert!(rescues
         .open_for_helper("ag_helper")
@@ -815,18 +818,21 @@ fn rescue_helper_report_transitions_and_validates_helper() {
         .open_for_source("ag_src")
         .expect("open")
         .expect("some");
-    rescues
+    let token = rescues
         .assign(&job.rescue_id, "ag_helper", Some("w:p9"))
-        .expect("assign");
+        .expect("assign")
+        .expect("token");
+    // Helper claims the dispatch → running before it may report `done`.
     rescues
-        .set_status(&job.rescue_id, RescueStatus::Running)
-        .expect("running");
+        .claim(&job.rescue_id, "ag_helper", &token)
+        .expect("claim");
 
     // A non-helper cannot report.
     assert!(rescues
         .helper_report(
             &job.rescue_id,
             "ag_intruder",
+            Some(token.as_str()),
             herdr_pool_store::HelperReport::Done
         )
         .is_err());
@@ -836,6 +842,7 @@ fn rescue_helper_report_transitions_and_validates_helper() {
         .helper_report(
             &job.rescue_id,
             "ag_helper",
+            Some(token.as_str()),
             herdr_pool_store::HelperReport::Done,
         )
         .expect("report done");
@@ -845,6 +852,7 @@ fn rescue_helper_report_transitions_and_validates_helper() {
         .helper_report(
             &job.rescue_id,
             "ag_helper",
+            Some(token.as_str()),
             herdr_pool_store::HelperReport::Done,
         )
         .expect("report done again");
@@ -855,6 +863,7 @@ fn rescue_helper_report_transitions_and_validates_helper() {
         .helper_report(
             &job.rescue_id,
             "ag_helper",
+            Some(token.as_str()),
             herdr_pool_store::HelperReport::NeedsHuman,
         )
         .expect("report needs-human");
@@ -865,6 +874,7 @@ fn rescue_helper_report_transitions_and_validates_helper() {
         .helper_report(
             &job.rescue_id,
             "ag_helper",
+            Some(token.as_str()),
             herdr_pool_store::HelperReport::Done
         )
         .is_err());
@@ -882,14 +892,16 @@ fn rescue_helper_report_needs_human_from_running() {
         .open_for_source("ag_src")
         .expect("open")
         .expect("some");
-    rescues
+    let token = rescues
         .assign(&job.rescue_id, "ag_helper", None)
-        .expect("assign");
+        .expect("assign")
+        .expect("token");
     // 'done' is not accepted while still 'assigned' (prompt may not have landed).
     assert!(rescues
         .helper_report(
             &job.rescue_id,
             "ag_helper",
+            Some(token.as_str()),
             herdr_pool_store::HelperReport::Done
         )
         .is_err());
@@ -898,8 +910,101 @@ fn rescue_helper_report_needs_human_from_running() {
         .helper_report(
             &job.rescue_id,
             "ag_helper",
+            Some(token.as_str()),
             herdr_pool_store::HelperReport::NeedsHuman,
         )
         .expect("report needs-human");
     assert_eq!(nh.status, RescueStatus::NeedsHuman);
+}
+
+#[test]
+fn rescue_claim_transitions_assigned_to_running() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("rescue_claim", &dir);
+    let rescues = store.rescues();
+    rescues
+        .create_pending("ag_src", Some("w:p1"), None, None)
+        .expect("create");
+    let job = rescues
+        .open_for_source("ag_src")
+        .expect("open")
+        .expect("some");
+    let token = rescues
+        .assign(&job.rescue_id, "ag_helper", Some("w:p9"))
+        .expect("assign")
+        .expect("token");
+
+    // Wrong helper and wrong token are both rejected.
+    assert!(rescues
+        .claim(&job.rescue_id, "ag_intruder", &token)
+        .is_err());
+    assert!(rescues
+        .claim(&job.rescue_id, "ag_helper", "dt_wrong")
+        .is_err());
+    assert!(rescues.claim(&job.rescue_id, "ag_helper", "").is_err());
+    // Status unchanged after rejected claims.
+    assert_eq!(
+        rescues
+            .get(&job.rescue_id)
+            .expect("get")
+            .expect("some")
+            .status,
+        RescueStatus::Assigned
+    );
+
+    // Correct claim → running (helper acknowledged the prompt landed).
+    let claimed = rescues
+        .claim(&job.rescue_id, "ag_helper", &token)
+        .expect("claim");
+    assert_eq!(claimed.status, RescueStatus::Running);
+    // Idempotent while running.
+    let again = rescues
+        .claim(&job.rescue_id, "ag_helper", &token)
+        .expect("claim again");
+    assert_eq!(again.status, RescueStatus::Running);
+}
+
+#[test]
+fn rescue_redispatch_fences_old_token() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("rescue_fence", &dir);
+    let rescues = store.rescues();
+    rescues
+        .create_pending("ag_src", Some("w:p1"), None, None)
+        .expect("create");
+    let job = rescues
+        .open_for_source("ag_src")
+        .expect("open")
+        .expect("some");
+    let token_v1 = rescues
+        .assign(&job.rescue_id, "ag_helper_a", Some("w:p9"))
+        .expect("assign v1")
+        .expect("token v1");
+
+    // Ambiguous dispatch: job returns to pending, then a re-dispatch to a
+    // different helper mints a NEW token.
+    rescues.unassign(&job.rescue_id).expect("unassign");
+    let token_v2 = rescues
+        .assign(&job.rescue_id, "ag_helper_b", Some("w:p8"))
+        .expect("assign v2")
+        .expect("token v2");
+    assert_ne!(token_v1, token_v2);
+
+    // The fenced-out helper A can neither claim nor report.
+    assert!(rescues
+        .claim(&job.rescue_id, "ag_helper_a", &token_v1)
+        .is_err());
+    assert!(rescues
+        .helper_report(
+            &job.rescue_id,
+            "ag_helper_a",
+            Some(token_v1.as_str()),
+            herdr_pool_store::HelperReport::NeedsHuman
+        )
+        .is_err());
+    // Helper B claims with the current token.
+    let claimed = rescues
+        .claim(&job.rescue_id, "ag_helper_b", &token_v2)
+        .expect("claim b");
+    assert_eq!(claimed.status, RescueStatus::Running);
 }

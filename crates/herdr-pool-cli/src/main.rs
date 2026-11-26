@@ -74,7 +74,7 @@ fn run(cli: &cli::Cli) -> Result<(), Failure> {
             action,
         } => commands::inbox::run(&ctx, &proc_env, *unread, *follow, action.as_ref()),
         cli::Command::Reply { target, text } => commands::reply::run(&ctx, &proc_env, target, text),
-        cli::Command::Rescue { id, outcome } => commands::rescue::run(&ctx, &proc_env, id, outcome),
+        cli::Command::Rescue { id, action } => commands::rescue::run(&ctx, &proc_env, id, action),
         cli::Command::Threads => commands::threads::run(&ctx, &proc_env),
         cli::Command::Message { action } => commands::message::run(&ctx, &proc_env, action),
         cli::Command::Daemon { action } => commands::daemon::run(&ctx, action),

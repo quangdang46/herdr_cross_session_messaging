@@ -676,6 +676,111 @@ fn rescue_without_helper_stays_pending() {
 }
 
 #[test]
+fn rescue_ambiguous_dispatch_holds_assignment_then_redispatches_fresh_token() {
+    // The dispatch prompt's outcome is lost (connection dropped after
+    // Herdr may have delivered it). The job must NOT be unassigned
+    // immediately — that would let a second helper be dispatched while
+    // the first may already hold the prompt. Instead it stays `assigned`
+    // until the stale window, then re-dispatches with a NEW fencing token
+    // that locks the first helper out of claim/report.
+    let server = FakeHerdr::start().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+
+    let pools = Arc::new(Pools::open(state.path()).unwrap());
+    let pool = pools
+        .for_scope_key("0123456789abcdef0123456789abcdef", project.path())
+        .unwrap();
+    let record = |agent_id: &str, pane_id: &str, status: &str| herdr_pool_store::AgentRecord {
+        agent_id: agent_id.into(),
+        scope_key: "0123456789abcdef0123456789abcdef".into(),
+        terminal_id: Some(format!("term_{agent_id}")),
+        pane_id: Some(pane_id.into()),
+        agent_kind: Some("claude".into()),
+        name: None,
+        cwd: None,
+        status: status.into(),
+        bootstrap_version: None,
+        first_seen_at: 0,
+        last_seen_at: 0,
+        offline_at: None,
+    };
+    pool.registry()
+        .upsert_agent(&record("ag_src", "w9:p10", "blocked"))
+        .unwrap();
+    pool.registry()
+        .upsert_agent(&record("ag_helper", "w9:p20", "idle"))
+        .unwrap();
+    pool.rescues()
+        .create_pending(
+            "ag_src",
+            Some("w9:p10"),
+            Some("tui".into()),
+            Some("visible".into()),
+        )
+        .unwrap();
+
+    // The dispatch prompt fails with a server-side `timeout` API error —
+    // ambiguous: Herdr may have delivered the prompt to the helper even
+    // though no success response came back. (A definitive rejection like
+    // `agent_blocked` would release the assignment instead.)
+    server
+        .on("agent.prompt")
+        .error("timeout", "prompt timed out");
+
+    let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
+    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = DeliveryWorker::new(
+        client,
+        pools,
+        shutdown,
+        Notify::default(),
+        Duration::from_millis(10),
+    )
+    .with_rescue_timeouts(Duration::from_secs(600), 5, Duration::from_millis(100));
+    worker.sweep_rescue().unwrap();
+
+    // Ambiguous outcome → assignment HELD (not released to pending),
+    // helper reservation kept, dispatch token persisted.
+    let job = pool.rescues().open_for_source("ag_src").unwrap().unwrap();
+    assert_eq!(job.status, herdr_pool_store::RescueStatus::Assigned);
+    assert_eq!(job.helper_agent_id.as_deref(), Some("ag_helper"));
+    let token_v1 = job.dispatch_token.clone().expect("dispatch token");
+    assert!(token_v1.starts_with("dt_"));
+    assert_eq!(server.requests_for("agent.prompt").len(), 1);
+    // The prompt carried the fencing token + claim instructions.
+    let text = server.requests_for("agent.prompt")[0].params["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(text.contains(&token_v1), "{text}");
+    assert!(text.contains("claim"), "{text}");
+
+    // Within the stale window: another sweep must not re-dispatch.
+    worker.sweep_rescue().unwrap();
+    assert_eq!(server.requests_for("agent.prompt").len(), 1);
+
+    // Past the stale window: first sweep returns the job to pending,
+    // second sweep re-dispatches — the new prompt carries a DIFFERENT
+    // fencing token.
+    std::thread::sleep(Duration::from_millis(150));
+    worker.sweep_rescue().unwrap();
+    let job = pool.rescues().open_for_source("ag_src").unwrap().unwrap();
+    assert_eq!(job.status, herdr_pool_store::RescueStatus::Pending);
+    worker.sweep_rescue().unwrap();
+    let job = pool.rescues().open_for_source("ag_src").unwrap().unwrap();
+    assert_eq!(job.status, herdr_pool_store::RescueStatus::Running);
+    let token_v2 = job.dispatch_token.clone().expect("token v2");
+    assert_ne!(token_v1, token_v2, "re-dispatch must mint a fresh token");
+
+    let prompts = server.requests_for("agent.prompt");
+    assert_eq!(prompts.len(), 2, "{prompts:?}");
+    let text2 = prompts[1].params["text"].as_str().unwrap();
+    assert!(text2.contains(&token_v2), "{text2}");
+    assert!(!text2.contains(&token_v1), "{text2}");
+}
+
+#[test]
 fn delivery_worker_notifies_on_delivery_when_enabled() {
     let server = FakeHerdr::start().unwrap();
     let project = tempfile::tempdir().unwrap();

@@ -46,6 +46,21 @@ All notable changes to this project are documented here. The format follows
   120s `RESCUE_VERIFY_TIMEOUT` grace before `needs_human`), `needs-human`
   escalates immediately with a `notification.show` toast. Only the
   assigned helper may report; the rescue prompt now carries the `rs_*` id.
+- Rescue dispatch fencing (migration V4): `assign` mints a `dt_*`
+  `dispatch_token` carried in the rescue prompt; the helper must
+  `herdr-pool rescue <rs-id> claim <token>` before touching the source
+  pane, and `done`/`needs-human` now take the token too. When
+  `agent.prompt` fails ambiguously (timeout, closed/transport/protocol
+  errors — the prompt may still have reached the helper), the job keeps
+  its assignment instead of being instantly re-picked; if the helper never
+  claims, the stale-`assigned` recovery re-dispatches with a FRESH token,
+  fencing the old helper out of `claim`/report so two helpers cannot both
+  work one source pane. Definitive API rejections (`agent_blocked`,
+  `agent_not_found`, ...) still release the helper immediately. The prompt
+  also carries the stable source agent id and instructs the helper to
+  re-resolve the source's current pane via `herdr-pool peers` before
+  acting, since `pane.move` can invalidate the pane id captured at
+  dispatch time.
 - Opt-in delivery toast: `HERDR_POOL_NOTIFY_DELIVERY=1|true|yes` makes the
   daemon `notification.show` on every successful delivery.
 - `MessageStore::defer` — reschedule pending/failed mail without consuming

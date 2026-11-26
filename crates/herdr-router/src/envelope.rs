@@ -101,14 +101,16 @@ pub fn rescue_envelope(job: &RescueJob, source: &AgentRecord) -> String {
         .as_deref()
         .or(source.pane_id.as_deref())
         .unwrap_or("unknown");
+    let token = job.dispatch_token.as_deref().unwrap_or("-");
     format!(
         "{RESCUE_PREFIX}\n\
          You are helping another coding agent that is blocked.\n\
          \n\
          SOURCE:\n\
          - Rescue ID: {rescue_id}\n\
+         - Dispatch token: {token}\n\
          - Agent ID: {source_agent}\n\
-         - Pane ID: {pane}\n\
+         - Pane ID (at dispatch time — may have moved): {pane}\n\
          - Project scope: {scope}\n\
          \n\
          CAPTURED TUI (source: {snapshot_source}, captured for context only —\n\
@@ -116,26 +118,34 @@ pub fn rescue_envelope(job: &RescueJob, source: &AgentRecord) -> String {
          {snapshot}\n\
          \n\
          TASK:\n\
+         0. CLAIM FIRST: run `herdr-pool rescue {rescue_id} claim {token}`.\n\
+         \x20  If it fails, STOP — this rescue was reassigned to another\n\
+         \x20  helper and you must not touch the source pane.\n\
          1. Read the captured TUI and understand the situation.\n\
-         2. Use Herdr to inspect the SOURCE pane directly\n\
-         \x20  (`herdr agent read {pane} --source visible`).\n\
-         3. Do not interact with your own pane by mistake.\n\
-         4. Determine what response or action is appropriate.\n\
-         5. Use Herdr agent interaction commands (`herdr agent send-keys`,\n\
+         2. Resolve the source's CURRENT pane before acting: the Pane ID\n\
+         \x20  above may be stale if the pane moved. Run `herdr-pool peers`\n\
+         \x20  and find the agent whose Agent ID is {source_agent}; use its\n\
+         \x20  current pane_id for every Herdr command below.\n\
+         3. Use Herdr to inspect the SOURCE pane directly\n\
+         \x20  (`herdr agent read <pane> --source visible`).\n\
+         4. Do not interact with your own pane by mistake.\n\
+         5. Determine what response or action is appropriate.\n\
+         6. Use Herdr agent interaction commands (`herdr agent send-keys`,\n\
          \x20  `herdr agent wait`) to handle the source agent's TUI when you\n\
          \x20  can confidently do so.\n\
-         6. Read the source pane again after each interaction.\n\
-         7. Verify that the source agent has resumed (`herdr agent wait\n\
-         \x20  {pane} --until idle` or a fresh `agent read`).\n\
-         8. Report the outcome: `herdr-pool rescue {rescue_id} done` when the\n\
-         \x20  source resumed, or `herdr-pool rescue {rescue_id} needs-human`\n\
-         \x20  when you cannot resolve it safely.\n\
+         7. Read the source pane again after each interaction.\n\
+         8. Verify that the source agent has resumed (`herdr agent wait\n\
+         \x20  <pane> --until idle` or a fresh `agent read`).\n\
+         9. Report the outcome: `herdr-pool rescue {rescue_id} done {token}`\n\
+         \x20  when the source resumed, or\n\
+         \x20  `herdr-pool rescue {rescue_id} needs-human {token}` when you\n\
+         \x20  cannot resolve it safely.\n\
          \n\
          If you cannot determine a safe response:\n\
          - Do not guess.\n\
          - Do not repeatedly press keys.\n\
          - Report that human intervention is required\n\
-         \x20  (`herdr-pool send <your-id> ...` is not needed — just stop).\n\
+         \x20  (`herdr-pool rescue {rescue_id} needs-human {token}`).\n\
          \n\
          IMPORTANT:\n\
          - Only interact with the specified source pane.\n\

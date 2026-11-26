@@ -407,8 +407,8 @@ fn threads_summarizes_conversations() {
 // ---------------------------------------------------------------------------
 
 /// Seed a running rescue job where `self` (w1:p1) is the assigned helper for
-/// the peer agent, returning the job id.
-fn seed_running_rescue(pool: &herdr_pool_core::PoolContext) -> String {
+/// the peer agent, returning the job id and its dispatch token.
+fn seed_running_rescue(pool: &herdr_pool_core::PoolContext) -> (String, String) {
     let peer_id = peer_agent_id(pool);
     let self_id = self_agent_id(pool);
     let rescues = pool.pool.rescues();
@@ -421,13 +421,14 @@ fn seed_running_rescue(pool: &herdr_pool_core::PoolContext) -> String {
         )
         .unwrap();
     let job = rescues.open_for_source(&peer_id).unwrap().unwrap();
-    rescues
+    let token = rescues
         .assign(&job.rescue_id, &self_id, Some("w1:p1"))
+        .unwrap()
         .unwrap();
     rescues
         .set_status(&job.rescue_id, herdr_pool_store::RescueStatus::Running)
         .unwrap();
-    job.rescue_id
+    (job.rescue_id, token)
 }
 
 #[test]
@@ -436,7 +437,7 @@ fn rescue_done_moves_job_to_verifying() {
     f.script_two_agents();
     let ctx = f.ctx();
 
-    let rescue_id = {
+    let (rescue_id, token) = {
         // `peers` reconciles agent.list into the registry — both the self
         // helper and the peer source must be present before seeding.
         with_env!(f, "w1:p1", |env| peers::run(&ctx, env)).unwrap();
@@ -448,7 +449,7 @@ fn rescue_done_moves_job_to_verifying() {
         &ctx,
         env,
         &rescue_id,
-        &crate::cli::RescueOutcome::Done,
+        &crate::cli::RescueAction::Done { token: Some(token) },
     ))
     .unwrap();
 
@@ -463,7 +464,7 @@ fn rescue_needs_human_escalates_and_toasts() {
     f.script_two_agents();
     let ctx = f.ctx();
 
-    let rescue_id = {
+    let (rescue_id, token) = {
         with_env!(f, "w1:p1", |env| peers::run(&ctx, env)).unwrap();
         let pool = open_pool(f.state.path(), f.project.path()).unwrap();
         seed_running_rescue(&pool)
@@ -473,7 +474,7 @@ fn rescue_needs_human_escalates_and_toasts() {
         &ctx,
         env,
         &rescue_id,
-        &crate::cli::RescueOutcome::NeedsHuman,
+        &crate::cli::RescueAction::NeedsHuman { token: Some(token) },
     ))
     .unwrap();
 
@@ -492,7 +493,7 @@ fn rescue_report_from_non_helper_is_rejected() {
     f.script_two_agents();
     let ctx = f.ctx();
 
-    let rescue_id = {
+    let (rescue_id, token) = {
         with_env!(f, "w1:p1", |env| peers::run(&ctx, env)).unwrap();
         let pool = open_pool(f.state.path(), f.project.path()).unwrap();
         seed_running_rescue(&pool)
@@ -503,7 +504,102 @@ fn rescue_report_from_non_helper_is_rejected() {
         &ctx,
         env,
         &rescue_id,
-        &crate::cli::RescueOutcome::Done,
+        &crate::cli::RescueAction::Done { token: Some(token) },
+    ));
+    assert!(result.is_err());
+}
+
+#[test]
+fn rescue_claim_then_done_round_trip() {
+    let f = Fixture::new();
+    f.script_two_agents();
+    let ctx = f.ctx();
+
+    let (rescue_id, token) = {
+        with_env!(f, "w1:p1", |env| peers::run(&ctx, env)).unwrap();
+        let pool = open_pool(f.state.path(), f.project.path()).unwrap();
+        let peer_id = peer_agent_id(&pool);
+        let self_id = self_agent_id(&pool);
+        let rescues = pool.pool.rescues();
+        rescues
+            .create_pending(&peer_id, Some("w1:p2"), None, None)
+            .unwrap();
+        let job = rescues.open_for_source(&peer_id).unwrap().unwrap();
+        let token = rescues
+            .assign(&job.rescue_id, &self_id, Some("w1:p1"))
+            .unwrap()
+            .unwrap();
+        (job.rescue_id, token)
+    };
+
+    // Claim first (assigned → running), then report done → verifying.
+    with_env!(f, "w1:p1", |env| crate::commands::rescue::run(
+        &ctx,
+        env,
+        &rescue_id,
+        &crate::cli::RescueAction::Claim {
+            token: token.clone(),
+        },
+    ))
+    .unwrap();
+    let pool = open_pool(f.state.path(), f.project.path()).unwrap();
+    assert_eq!(
+        pool.pool.rescues().get(&rescue_id).unwrap().unwrap().status,
+        herdr_pool_store::RescueStatus::Running
+    );
+
+    with_env!(f, "w1:p1", |env| crate::commands::rescue::run(
+        &ctx,
+        env,
+        &rescue_id,
+        &crate::cli::RescueAction::Done {
+            token: Some(token.clone()),
+        },
+    ))
+    .unwrap();
+    let pool = open_pool(f.state.path(), f.project.path()).unwrap();
+    assert_eq!(
+        pool.pool.rescues().get(&rescue_id).unwrap().unwrap().status,
+        herdr_pool_store::RescueStatus::Verifying
+    );
+}
+
+#[test]
+fn rescue_stale_token_claim_is_rejected() {
+    let f = Fixture::new();
+    f.script_two_agents();
+    let ctx = f.ctx();
+
+    let (rescue_id, _token) = {
+        with_env!(f, "w1:p1", |env| peers::run(&ctx, env)).unwrap();
+        let pool = open_pool(f.state.path(), f.project.path()).unwrap();
+        let peer_id = peer_agent_id(&pool);
+        let self_id = self_agent_id(&pool);
+        let rescues = pool.pool.rescues();
+        rescues
+            .create_pending(&peer_id, Some("w1:p2"), None, None)
+            .unwrap();
+        let job = rescues.open_for_source(&peer_id).unwrap().unwrap();
+        let token = rescues
+            .assign(&job.rescue_id, &self_id, Some("w1:p1"))
+            .unwrap()
+            .unwrap();
+        // Simulate re-dispatch: release and re-assign mints a new token.
+        rescues.unassign(&job.rescue_id).unwrap();
+        let new_token = rescues
+            .assign(&job.rescue_id, &self_id, Some("w1:p1"))
+            .unwrap()
+            .unwrap();
+        assert_ne!(token, new_token);
+        (job.rescue_id, token)
+    };
+
+    // The old token is fenced out.
+    let result = with_env!(f, "w1:p1", |env| crate::commands::rescue::run(
+        &ctx,
+        env,
+        &rescue_id,
+        &crate::cli::RescueAction::Claim { token: _token },
     ));
     assert!(result.is_err());
 }
