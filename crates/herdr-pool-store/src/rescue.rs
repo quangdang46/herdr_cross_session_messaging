@@ -91,6 +91,9 @@ pub struct RescueJob {
     pub snapshot: Option<String>,
     /// Which read produced `snapshot` (`visible`, `recent-unwrapped`, ...).
     pub snapshot_source: Option<String>,
+    /// When the snapshot was captured (unix millis) — snapshot freshness is
+    /// tracked separately from job bookkeeping timestamps.
+    pub captured_at: Option<i64>,
     /// Lifecycle status.
     pub status: RescueStatus,
     /// Dispatch/assignment attempts used.
@@ -120,6 +123,7 @@ fn rescue_from_row(row: &Row<'_>) -> rusqlite::Result<RescueJob> {
         helper_pane_id: row.get("helper_pane_id")?,
         snapshot: row.get("snapshot")?,
         snapshot_source: row.get("snapshot_source")?,
+        captured_at: row.get("captured_at")?,
         status: RescueStatus::parse(&status),
         attempts: u32::try_from(attempts).unwrap_or(u32::MAX),
         created_at: row.get("created_at")?,
@@ -129,8 +133,8 @@ fn rescue_from_row(row: &Row<'_>) -> rusqlite::Result<RescueJob> {
 }
 
 const RESCUE_COLUMNS: &str = "rescue_id, scope_key, source_agent_id, source_pane_id, \
-     helper_agent_id, helper_pane_id, snapshot, snapshot_source, status, attempts, \
-     created_at, updated_at, resolved_at";
+     helper_agent_id, helper_pane_id, snapshot, snapshot_source, captured_at, status, \
+     attempts, created_at, updated_at, resolved_at";
 
 /// Scoped repository over the `rescue_jobs` table of one pool db.
 pub struct RescueStore<'a> {
@@ -164,8 +168,8 @@ impl<'a> RescueStore<'a> {
         self.pool.conn().execute(
             "INSERT INTO rescue_jobs \
              (rescue_id, scope_key, source_agent_id, source_pane_id, snapshot, \
-              snapshot_source, status, attempts, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', 0, ?7, ?7)",
+              snapshot_source, captured_at, status, attempts, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', 0, ?7, ?7)",
             params![
                 new_rescue_id(),
                 self.pool.scope_key(),
@@ -330,7 +334,9 @@ impl<'a> RescueStore<'a> {
         conn.execute(
             "UPDATE rescue_jobs SET source_pane_id = COALESCE(?1, source_pane_id), \
              snapshot = COALESCE(?2, snapshot), \
-             snapshot_source = COALESCE(?3, snapshot_source), updated_at = ?4 \
+             snapshot_source = COALESCE(?3, snapshot_source), \
+             captured_at = CASE WHEN ?2 IS NOT NULL THEN ?4 ELSE captured_at END, \
+             updated_at = ?4 \
              WHERE rescue_id = ?5",
             params![
                 source_pane_id,

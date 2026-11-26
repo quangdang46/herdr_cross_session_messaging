@@ -30,7 +30,11 @@ All notable changes to this project are documented here. The format follows
   (15 min) or `RESCUE_MAX_ATTEMPTS` dispatches escalate to `needs_human`
   with a `notification.show` toast. On `agent_blocked` the delivery worker
   still defers without consuming attempts and shows the throttled blocked
-  toast as before.
+  toast as before. Jobs record `captured_at` (snapshot freshness),
+  reservations taken earlier in the same sweep exclude later picks (parallel
+  rescues get distinct helpers), and `assigned` rows stale past
+  `RESCUE_ASSIGNED_STALE` (60s — the crash window between reserve and
+  prompt) return to `pending` for redispatch.
 - Opt-in delivery toast: `HERDR_POOL_NOTIFY_DELIVERY=1|true|yes` makes the
   daemon `notification.show` on every successful delivery.
 - `MessageStore::defer` — reschedule pending/failed mail without consuming

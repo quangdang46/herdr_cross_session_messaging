@@ -512,6 +512,170 @@ fn delivery_worker_blocked_creates_rescue_job_and_dispatches_helper() {
 }
 
 #[test]
+fn rescue_dispatches_multiple_blocked_agents_to_distinct_helpers() {
+    // Case 2: two blocked sources, two idle helpers → both rescues dispatch
+    // in parallel, each to a different helper (R5/R6).
+    let server = FakeHerdr::start().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+
+    let pools = Arc::new(Pools::open(state.path()).unwrap());
+    let pool = pools
+        .for_scope_key("0123456789abcdef0123456789abcdef", project.path())
+        .unwrap();
+    let record = |agent_id: &str, pane_id: &str, status: &str| herdr_pool_store::AgentRecord {
+        agent_id: agent_id.into(),
+        scope_key: "0123456789abcdef0123456789abcdef".into(),
+        terminal_id: Some(format!("term_{agent_id}")),
+        pane_id: Some(pane_id.into()),
+        agent_kind: Some("claude".into()),
+        name: None,
+        cwd: None,
+        status: status.into(),
+        bootstrap_version: None,
+        first_seen_at: 0,
+        last_seen_at: 0,
+        offline_at: None,
+    };
+    for (id, pane, status) in [
+        ("ag_src1", "w9:p11", "blocked"),
+        ("ag_src2", "w9:p12", "blocked"),
+        ("ag_helper1", "w9:p21", "idle"),
+        ("ag_helper2", "w9:p22", "idle"),
+    ] {
+        pool.registry()
+            .upsert_agent(&record(id, pane, status))
+            .unwrap();
+    }
+    let rescues = pool.rescues();
+    rescues
+        .create_pending(
+            "ag_src1",
+            Some("w9:p11"),
+            Some("tui-1".into()),
+            Some("visible".into()),
+        )
+        .unwrap();
+    rescues
+        .create_pending(
+            "ag_src2",
+            Some("w9:p12"),
+            Some("tui-2".into()),
+            Some("visible".into()),
+        )
+        .unwrap();
+
+    server
+        .on("agent.prompt")
+        .respond(herdr_testkit::canned_result("agent_prompted"));
+
+    let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
+    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = DeliveryWorker::new(
+        client,
+        pools,
+        shutdown,
+        Notify::default(),
+        Duration::from_millis(10),
+    );
+    worker.sweep_rescue().unwrap();
+
+    let j1 = rescues.open_for_source("ag_src1").unwrap().unwrap();
+    let j2 = rescues.open_for_source("ag_src2").unwrap().unwrap();
+    assert_eq!(j1.status, herdr_pool_store::RescueStatus::Running);
+    assert_eq!(j2.status, herdr_pool_store::RescueStatus::Running);
+    assert_ne!(
+        j1.helper_agent_id, j2.helper_agent_id,
+        "each rescue must hold a distinct helper reservation"
+    );
+
+    let prompts = server.requests_for("agent.prompt");
+    assert_eq!(
+        prompts.len(),
+        2,
+        "one rescue prompt per source: {prompts:?}"
+    );
+    let targets: Vec<&str> = prompts
+        .iter()
+        .filter_map(|r| r.params["target"].as_str())
+        .collect();
+    assert!(
+        targets.contains(&"w9:p21") && targets.contains(&"w9:p22"),
+        "{targets:?}"
+    );
+    // Snapshot handoff: each helper prompt carries its own source's TUI.
+    let texts: Vec<&str> = prompts
+        .iter()
+        .filter_map(|r| r.params["text"].as_str())
+        .collect();
+    assert!(texts
+        .iter()
+        .any(|t| t.contains("tui-1") && t.contains("ag_src1")));
+    assert!(texts
+        .iter()
+        .any(|t| t.contains("tui-2") && t.contains("ag_src2")));
+}
+
+#[test]
+fn rescue_without_helper_stays_pending() {
+    // R7: only blocked agents in scope → jobs remain pending, no prompts.
+    let server = FakeHerdr::start().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+
+    let pools = Arc::new(Pools::open(state.path()).unwrap());
+    let pool = pools
+        .for_scope_key("0123456789abcdef0123456789abcdef", project.path())
+        .unwrap();
+    for (id, pane) in [("ag_a", "w9:p1"), ("ag_b", "w9:p2")] {
+        pool.registry()
+            .upsert_agent(&herdr_pool_store::AgentRecord {
+                agent_id: id.into(),
+                scope_key: "0123456789abcdef0123456789abcdef".into(),
+                terminal_id: Some(format!("term_{id}")),
+                pane_id: Some(pane.into()),
+                agent_kind: Some("claude".into()),
+                name: None,
+                cwd: None,
+                status: "blocked".into(),
+                bootstrap_version: None,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                offline_at: None,
+            })
+            .unwrap();
+    }
+    let rescues = pool.rescues();
+    rescues
+        .create_pending("ag_a", Some("w9:p1"), None, None)
+        .unwrap();
+    rescues
+        .create_pending("ag_b", Some("w9:p2"), None, None)
+        .unwrap();
+
+    let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
+    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = DeliveryWorker::new(
+        client,
+        pools,
+        shutdown,
+        Notify::default(),
+        Duration::from_millis(10),
+    );
+    // Several sweeps: still no eligible helper, jobs stay pending.
+    for _ in 0..3 {
+        worker.sweep_rescue().unwrap();
+    }
+
+    assert!(server.requests_for("agent.prompt").is_empty());
+    for src in ["ag_a", "ag_b"] {
+        let job = rescues.open_for_source(src).unwrap().unwrap();
+        assert_eq!(job.status, herdr_pool_store::RescueStatus::Pending);
+        assert!(job.helper_agent_id.is_none());
+    }
+}
+
+#[test]
 fn delivery_worker_notifies_on_delivery_when_enabled() {
     let server = FakeHerdr::start().unwrap();
     let project = tempfile::tempdir().unwrap();

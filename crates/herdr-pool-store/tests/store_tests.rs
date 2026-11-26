@@ -62,12 +62,13 @@ fn migrations_apply_once_and_reopen_is_idempotent() {
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0].content, "hello");
 
-    // Schema version is 2 (V1 schema + V2 rescue_jobs) and core tables exist.
+    // Schema version is 3 (V1 schema + V2 rescue_jobs + V3 captured_at)
+    // and core tables exist.
     let conn = Connection::open(store.path()).expect("raw conn");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("user_version");
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     for table in ["agents", "threads", "messages", "rescue_jobs"] {
         let exists: bool = conn
             .query_row(

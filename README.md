@@ -351,9 +351,14 @@ paths), `crates/herdr-router` (daemon loop + delivery + rescue),
 - **No LLM classification, no orchestration** — this is a message pipe, not a
   manager. Routing decisions stay with the agents and the user.
 - **Unix only for now** — Windows named-pipe transport is designed but deferred.
-- **Rescue assists, doesn't fix** — on `agent_blocked` the daemon defers mail,
-  snapshots the pane tail, toasts the user, and after 5 min asks a peer to
-  check on the stuck agent. It never sends keys or approves permissions.
+- **Rescue delegates, doesn't decide** — on `agent_blocked` the daemon keeps
+  a durable `rescue_jobs` row, snapshots the stuck pane's visible TUI, and
+  hands it to an eligible peer in the same scope. The *peer* reads and
+  drives the source pane via Herdr (`agent read`/`send-keys`/`wait`); the
+  pool never classifies questions, picks answers, or sends keys itself.
+  One rescue per helper, no rescue loops (a blocked agent is never a
+  helper), jobs queue when no helper exists, and stale jobs escalate to
+  `needs_human` with a toast.
 - **Scope = pane launch cwd** by default — agents launched in a
   subdirectory get their own scope. Set `HERDR_POOL_SCOPE_MODE=git` to scope
   by the nearest git toplevel instead, so subdirectories of one repo share a
@@ -397,12 +402,15 @@ threads are sufficient and keep the dep tree small.
 
 ## Roadmap
 
-- **Phase 2 — blocked-agent rescue**: shipped — the daemon defers
-  `agent_blocked` mail without consuming attempts, snapshots the pane tail
-  into the log, shows a throttled `notification.show` toast, and after 5 min
-  of continuous blocking asks a peer agent to check on the stuck one. It
-  never sends keys or approves permissions; deeper autonomous recovery
-  (permission dialogs, crash loops) remains open.
+- **Phase 2 — blocked-agent rescue**: shipped — durable `rescue_jobs` in
+  SQLite survive daemon restarts; the daemon snapshots the blocked pane's
+  visible TUI and dispatches a `[HERDR RESCUE REQUEST]` to the best
+  eligible peer (idle > done > working; blocked/offline/reserved excluded),
+  which drives the source pane via Herdr and verifies it resumed. Multiple
+  blocked agents get parallel helpers; no helper → jobs stay `pending`;
+  timeout/attempt cap → `needs_human` + toast. Remaining: E2E validation
+  across agent TUIs on real Herdr, and a helper→pool "needs human" feedback
+  channel (today the job timeout covers it).
 - **Phase 3 — inbox UI**: popup pane shipped (`[[panes]] inbox`,
   `herdr plugin pane open --plugin herdr.cross-session-messaging
   --entrypoint inbox`) rendering `herdr-pool inbox --follow`; identity inside

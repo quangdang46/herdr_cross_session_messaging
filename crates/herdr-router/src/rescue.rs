@@ -48,6 +48,12 @@ pub const RESCUE_JOB_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub const RESCUE_FALLBACK_LINES: u32 = 120;
 /// Dispatch attempts allowed before a pending job escalates to `needs_human`.
 pub const RESCUE_MAX_ATTEMPTS: u32 = 5;
+/// An `assigned` job older than this is treated as crashed-between-assign-
+/// and-prompt and returned to `pending` for redispatch. The assign→prompt
+/// window is synchronous, so a persisted `assigned` row only survives a
+/// daemon crash; 60s is far longer than that window yet short enough to
+/// recover quickly.
+pub const RESCUE_ASSIGNED_STALE: Duration = Duration::from_secs(60);
 
 /// Rescue coordinator: detection, snapshotting, helper selection,
 /// reservation, dispatch, monitoring, and expiry across all scope pools.
@@ -163,7 +169,9 @@ impl RescueManager {
                 return Ok(());
             }
         };
-        let reserved: HashSet<String> = open
+        // `reserved` is mutated as jobs dispatch within this sweep, so two
+        // pending jobs never pick the same helper in one pass (R6).
+        let mut reserved: HashSet<String> = open
             .iter()
             .filter_map(|j| j.helper_agent_id.clone())
             .collect();
@@ -171,7 +179,7 @@ impl RescueManager {
             agents.iter().map(|a| (a.agent_id.as_str(), a)).collect();
 
         for job in &open {
-            if let Err(err) = self.drive_job(pool, job, &agents, &by_id, &reserved) {
+            if let Err(err) = self.drive_job(pool, job, &agents, &by_id, &mut reserved) {
                 tracing::debug!(rescue = %job.rescue_id, error = %err, "rescue drive failed");
             }
         }
@@ -185,11 +193,26 @@ impl RescueManager {
         job: &RescueJob,
         agents: &[AgentRecord],
         by_id: &std::collections::HashMap<&str, &AgentRecord>,
-        reserved: &HashSet<String>,
+        reserved: &mut HashSet<String>,
     ) -> Result<()> {
         let rescues = pool.rescues();
         let now = now_millis();
         let age = now.saturating_sub(job.created_at);
+
+        // Crash recovery: `assigned` is only persisted between the assign
+        // UPDATE and the prompt call — a row still `assigned` after
+        // RESCUE_ASSIGNED_STALE means the daemon died mid-dispatch (or the
+        // prompt result was lost). Return it to pending for redispatch.
+        if job.status == RescueStatus::Assigned
+            && now.saturating_sub(job.updated_at) > RESCUE_ASSIGNED_STALE.as_millis() as i64
+        {
+            tracing::info!(
+                rescue = %job.rescue_id,
+                "stale assigned rescue returned to pending"
+            );
+            let _ = rescues.unassign(&job.rescue_id);
+            return Ok(());
+        }
 
         // Expiry: open too long, or too many failed dispatches → human.
         if age > self.job_timeout.as_millis() as i64
@@ -248,7 +271,7 @@ impl RescueManager {
         job: &RescueJob,
         agents: &[AgentRecord],
         by_id: &std::collections::HashMap<&str, &AgentRecord>,
-        reserved: &HashSet<String>,
+        reserved: &mut HashSet<String>,
     ) -> Result<()> {
         let Some(source) = by_id.get(job.source_agent_id.as_str()).copied() else {
             return Ok(());
@@ -283,6 +306,9 @@ impl RescueManager {
         match self.client.agent_prompt(&helper_target, &text, None) {
             Ok(_) => {
                 let _ = rescues.set_status(&job.rescue_id, RescueStatus::Running);
+                // Hold the reservation for the rest of this sweep so a
+                // second pending job picks a different helper (R6).
+                reserved.insert(helper.agent_id.clone());
                 tracing::info!(
                     rescue = %job.rescue_id,
                     source = %job.source_agent_id,
