@@ -311,10 +311,15 @@ decide at scaffold — prefer 2021 for max compat).
   `RescueManager` snapshots the source pane's visible TUI, reserves an
   eligible same-scope helper (idle > done > working; blocked/offline/
   reserved excluded — no A↔B loops), and dispatches a
-  `[HERDR RESCUE REQUEST]` prompt. The helper drives the source pane via
-  Herdr and reports `herdr-pool rescue <id> done|needs-human`; the monitor
-  resolves jobs whose source unblocked, with timeouts/attempt caps and
-  crash recovery (`assigned`-stale → pending) escalating to `needs_human`.
+  `[HERDR RESCUE REQUEST]` prompt carrying a `dt_*` dispatch token. The
+  helper must `herdr-pool rescue <id> claim <token>` before touching the
+  source pane (re-resolving its current pane via `peers`, since
+  `pane.move` can stale the captured id), drives it via Herdr, and reports
+  `herdr-pool rescue <id> done|needs-human <token>`; ambiguous
+  `agent.prompt` outcomes keep the assignment so stale-`assigned`
+  recovery re-dispatches with a fresh token that fences the old helper
+  out. The monitor resolves jobs whose source unblocked, with
+  timeouts/attempt caps and crash recovery escalating to `needs_human`.
 - **Phase 3 (shipped)**: popup inbox UI (`[[panes]] inbox` +
   `herdr-pool inbox --follow` with `q`/`u` keys, identity via
   `HERDR_PLUGIN_CONTEXT_JSON`), `herdr-pool broadcast`, opt-in delivery
