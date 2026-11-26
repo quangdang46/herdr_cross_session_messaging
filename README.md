@@ -103,7 +103,8 @@ is designed but cfg-gated out of MVP.
 # Development — link this checkout:
 herdr plugin link /path/to/herdr_cross_session_messaging
 
-# Release — install from GitHub once binaries/manifests are published:
+# Release — install from GitHub (requires a Rust toolchain; the plugin's
+# [[build]] commands run `cargo install` to put the binaries on PATH):
 herdr plugin install quangdang46/herdr_cross_session_messaging
 ```
 
@@ -113,8 +114,9 @@ The plugin also ships an `open-inbox` workspace action
 (`herdr plugin action invoke …`) for quick inbox access.
 
 **Binaries on PATH** (the plugin needs `herdr-pool` and `herdr-routerd`
-findable). Until crates.io publishing is unblocked, install straight from
-git:
+findable — `herdr plugin install`'s `[[build]]` commands handle this via
+`cargo install`; a Rust toolchain is required). You can also install
+straight from git:
 
 ```bash
 cargo install --git https://github.com/quangdang46/herdr_cross_session_messaging \

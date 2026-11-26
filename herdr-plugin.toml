@@ -3,7 +3,18 @@ name = "Cross-Session Messaging"
 version = "0.1.0"
 min_herdr_version = "0.9.0"
 description = "Peer-to-peer messaging layer for coding agents in Herdr (project-scoped pools, herdr-pool CLI, agent skills)."
-platforms = ["linux", "macos", "windows"]
+# Windows is excluded: the Herdr socket transport there is a named pipe,
+# which herdr-protocol does not implement yet.
+platforms = ["linux", "macos"]
+
+# `herdr plugin install` runs these once; they put `herdr-pool` and
+# `herdr-routerd` on PATH (~/.cargo/bin) so startup/actions/panes and the
+# agent-facing skill can all resolve them. Requires a Rust toolchain.
+[[build]]
+command = ["cargo", "install", "--path", "bins/herdr-pool-cli", "--locked"]
+
+[[build]]
+command = ["cargo", "install", "--path", "bins/herdr-routerd", "--locked"]
 
 [[startup]]
 command = ["herdr-routerd", "start"]
@@ -17,7 +28,7 @@ command = ["herdr-pool", "inbox"]
 [[panes]]
 id = "inbox"
 title = "Messaging inbox"
-platforms = ["linux", "macos", "windows"]
+platforms = ["linux", "macos"]
 placement = "popup"
 width = "80%"
 height = 20
