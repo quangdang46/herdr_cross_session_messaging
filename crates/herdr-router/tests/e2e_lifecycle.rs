@@ -16,6 +16,7 @@
 //! * `pane.agent_detected` → exactly one bootstrap prompt; a
 //!   `bootstrap_version` bump re-bootstraps exactly once more.
 
+#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::atomic::AtomicBool;

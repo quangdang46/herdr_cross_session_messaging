@@ -6,6 +6,8 @@
 //! registry updates → outbox delivery with the `[herdr-pool]` envelope,
 //! and `agent_blocked` keeping mail pending.
 
+#![cfg(unix)]
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
