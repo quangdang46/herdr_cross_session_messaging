@@ -306,10 +306,15 @@ decide at scaffold — prefer 2021 for max compat).
 - **M4 Daemon**: routerd event loop, delivery worker, ensure_daemon, startup hook.
 - **M5 Skill + manifest**: SKILL.md, installer, herdr-plugin.toml, bootstrap prompt.
 - **M6 E2E + polish**: fake-socket e2e suite, docs, README, release workflow.
-- **Phase 2 (later)**: rescue engine (blocked detect → snapshot → peer assist →
-  send_keys/prompt reply), delivery receipts UI via plugin pane, agent.view.set
-  projection for messaging attention.
-- **Phase 3**: popup inbox UI, broadcast within scope, notification.show hooks.
+- **Phase 2 (shipped)**: rescue engine — `agent_blocked` defers without
+  consuming attempts; throttled pane snapshot + `notification.show` toast;
+  peer-assist escalation after 5min blocked prompts another live agent in
+  scope with the snapshot. Remaining: richer assist actions (send_keys
+  suggestions), `agent.view.set` attention projection.
+- **Phase 3 (partially shipped)**: popup inbox UI (`[[panes]] inbox` +
+  `herdr-pool inbox --follow`, identity via `HERDR_PLUGIN_CONTEXT_JSON`),
+  `herdr-pool broadcast`. Remaining: interactive inbox keys, notification
+  hooks for inbound mail.
 
 ## 7. Open questions / decisions to lock in beads
 
