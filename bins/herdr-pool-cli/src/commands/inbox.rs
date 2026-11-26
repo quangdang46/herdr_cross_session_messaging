@@ -98,15 +98,18 @@ fn inbox_table(messages: &[Message]) -> String {
 fn follow_inbox(pool: &PoolContext, agent_id: &str, unread: bool) -> CmdResult<()> {
     let stdout = std::io::stdout();
     loop {
-        let messages = pool.pool.messages().inbox(agent_id, unread)?;
-        let body = if messages.is_empty() {
-            if unread {
-                "no unread messages".to_string()
-            } else {
-                "inbox is empty".to_string()
+        // A transient store error must not kill the popup — show it and
+        // keep redrawing.
+        let body = match pool.pool.messages().inbox(agent_id, unread) {
+            Ok(messages) if messages.is_empty() => {
+                if unread {
+                    "no unread messages".to_string()
+                } else {
+                    "inbox is empty".to_string()
+                }
             }
-        } else {
-            inbox_table(&messages)
+            Ok(messages) => inbox_table(&messages),
+            Err(err) => format!("inbox error: {err}"),
         };
         let frame = format!(
             "\x1b[2J\x1b[Hherdr-pool inbox — live (esc to close)\n{}\n",
