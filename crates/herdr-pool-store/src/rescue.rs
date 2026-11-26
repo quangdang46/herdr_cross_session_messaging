@@ -311,10 +311,10 @@ impl<'a> RescueStore<'a> {
     /// Record the assigned helper's report.
     ///
     /// Only the agent named in `helper_agent_id` may report — anyone else
-    /// gets [`StoreError::Invalid`]. `Done` moves `running`/`assigned` →
-    /// `verifying` (idempotent when already verifying); `NeedsHuman` moves
-    /// any helper-held open status → `needs_human`. Terminal jobs and
-    /// jobs without a helper reservation reject reports.
+    /// gets [`StoreError::Invalid`]. `Done` moves `running` → `verifying`
+    /// (idempotent when already verifying); `NeedsHuman` moves any
+    /// helper-held open status → `needs_human`. Terminal jobs and jobs
+    /// without a helper reservation reject reports.
     #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn helper_report(
         &self,
