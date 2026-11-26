@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::sync::{Arc, Mutex};
 
 use herdr_protocol::HerdrClient;
 use herdr_testkit::{FakeHerdr, HandlerReply};
@@ -26,14 +27,43 @@ pub struct Fixture {
     pub server: FakeHerdr,
     pub state: TempDir,
     pub project: TempDir,
+    /// `agent.get` target (pane id) → agent record, consulted live by the
+    /// scripted responder so tests can register agents in any order.
+    agent_gets: Arc<Mutex<HashMap<String, Value>>>,
 }
 
 impl Fixture {
     pub fn new() -> Self {
+        let agent_gets: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
+        let server = FakeHerdr::start().expect("fake herdr");
+        // One responder shape for every pane: look the target up in the
+        // shared map at request time. Queueing per-pane closures instead
+        // would make answers depend on FIFO consumption order.
+        for _ in 0..SCRIPTED_DEPTH {
+            let agent_gets = Arc::clone(&agent_gets);
+            server.on("agent.get").then(move |req| {
+                let target = req
+                    .params
+                    .get("target")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                let agent = agent_gets.lock().unwrap().get(target).cloned();
+                match agent {
+                    Some(agent) => {
+                        HandlerReply::Result(json!({"type": "agent_info", "agent": agent}))
+                    }
+                    None => HandlerReply::Error {
+                        code: "agent_not_found".into(),
+                        message: format!("no agent for {target}"),
+                    },
+                }
+            });
+        }
         Self {
-            server: FakeHerdr::start().expect("fake herdr"),
+            server,
             state: TempDir::new().expect("state dir"),
             project: TempDir::new().expect("project dir"),
+            agent_gets,
         }
     }
 
@@ -68,8 +98,8 @@ impl Fixture {
         .collect()
     }
 
-    /// Script `pane.current` + `agent.get` so `resolve_self` sees `agent`
-    /// on `self_pane`.
+    /// Script `pane.current` so `resolve_self` sees `self_pane`, and
+    /// register an agent record for `agent.get` on that pane.
     ///
     /// FakeHerdr consumes one scripted responder per request, so each
     /// responder is queued [`SCRIPTED_DEPTH`] times — enough for the
@@ -79,34 +109,27 @@ impl Fixture {
         for _ in 0..SCRIPTED_DEPTH {
             self.server.on("pane.current").respond(pane_result.clone());
         }
-        let pane = self_pane.to_string();
-        let agent = agent_value(
+        self.script_agent_get(
             self_pane,
-            self_terminal,
-            "claude",
-            Some("self"),
-            cwd,
-            "idle",
+            agent_value(
+                self_pane,
+                self_terminal,
+                "claude",
+                Some("self"),
+                cwd,
+                "idle",
+            ),
         );
-        for _ in 0..SCRIPTED_DEPTH {
-            let pane = pane.clone();
-            let agent = agent.clone();
-            self.server.on("agent.get").then(move |req| {
-                let target = req
-                    .params
-                    .get("target")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
-                if target == pane {
-                    HandlerReply::Result(json!({"type": "agent_info", "agent": agent.clone()}))
-                } else {
-                    HandlerReply::Error {
-                        code: "agent_not_found".into(),
-                        message: format!("no agent for {target}"),
-                    }
-                }
-            });
-        }
+    }
+
+    /// Register `agent` (an [`agent_value`]) as the `agent.get` answer for
+    /// `pane_id`. Safe to call for any number of panes — the responder
+    /// resolves targets from a shared map at request time.
+    pub fn script_agent_get(&self, pane_id: &str, agent: Value) {
+        self.agent_gets
+            .lock()
+            .unwrap()
+            .insert(pane_id.to_string(), agent);
     }
 
     /// Script `agent.list` with the given agent objects (see [`agent_value`]).
@@ -120,10 +143,14 @@ impl Fixture {
     }
 
     /// Convenience: script self + a two-agent list (self + one peer) in
-    /// `project_cwd()`.
+    /// `project_cwd()`, with `agent.get` answers for both panes.
     pub fn script_two_agents(&self) {
         let cwd = self.project_cwd();
         self.script_self("w1:p1", "term_self", &cwd);
+        self.script_agent_get(
+            "w1:p2",
+            agent_value("w1:p2", "term_peer", "codex", Some("peer"), &cwd, "idle"),
+        );
         self.script_agent_list(vec![
             agent_value("w1:p1", "term_self", "claude", Some("self"), &cwd, "idle"),
             agent_value("w1:p2", "term_peer", "codex", Some("peer"), &cwd, "idle"),

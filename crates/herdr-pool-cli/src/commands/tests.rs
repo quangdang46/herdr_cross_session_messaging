@@ -437,8 +437,9 @@ fn rescue_done_moves_job_to_verifying() {
     let ctx = f.ctx();
 
     let rescue_id = {
-        with_env!(f, "w1:p1", |env| whoami::run(&ctx, env)).unwrap();
-        with_env!(f, "w1:p2", |env| whoami::run(&ctx, env)).unwrap();
+        // `peers` reconciles agent.list into the registry — both the self
+        // helper and the peer source must be present before seeding.
+        with_env!(f, "w1:p1", |env| peers::run(&ctx, env)).unwrap();
         let pool = open_pool(f.state.path(), f.project.path()).unwrap();
         seed_running_rescue(&pool)
     };
@@ -463,8 +464,7 @@ fn rescue_needs_human_escalates_and_toasts() {
     let ctx = f.ctx();
 
     let rescue_id = {
-        with_env!(f, "w1:p1", |env| whoami::run(&ctx, env)).unwrap();
-        with_env!(f, "w1:p2", |env| whoami::run(&ctx, env)).unwrap();
+        with_env!(f, "w1:p1", |env| peers::run(&ctx, env)).unwrap();
         let pool = open_pool(f.state.path(), f.project.path()).unwrap();
         seed_running_rescue(&pool)
     };
@@ -493,8 +493,7 @@ fn rescue_report_from_non_helper_is_rejected() {
     let ctx = f.ctx();
 
     let rescue_id = {
-        with_env!(f, "w1:p1", |env| whoami::run(&ctx, env)).unwrap();
-        with_env!(f, "w1:p2", |env| whoami::run(&ctx, env)).unwrap();
+        with_env!(f, "w1:p1", |env| peers::run(&ctx, env)).unwrap();
         let pool = open_pool(f.state.path(), f.project.path()).unwrap();
         seed_running_rescue(&pool)
     };
