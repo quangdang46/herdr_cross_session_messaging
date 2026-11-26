@@ -309,12 +309,16 @@ decide at scaffold — prefer 2021 for max compat).
 - **Phase 2 (shipped)**: rescue engine — `agent_blocked` defers without
   consuming attempts; throttled pane snapshot + `notification.show` toast;
   peer-assist escalation after 5min blocked prompts another live agent in
-  scope with the snapshot. Remaining: richer assist actions (send_keys
-  suggestions), `agent.view.set` attention projection.
-- **Phase 3 (partially shipped)**: popup inbox UI (`[[panes]] inbox` +
-  `herdr-pool inbox --follow`, identity via `HERDR_PLUGIN_CONTEXT_JSON`),
-  `herdr-pool broadcast`. Remaining: interactive inbox keys, notification
-  hooks for inbound mail.
+  scope with the snapshot.
+- **Phase 3 (shipped)**: popup inbox UI (`[[panes]] inbox` +
+  `herdr-pool inbox --follow` with `q`/`u` keys, identity via
+  `HERDR_PLUGIN_CONTEXT_JSON`), `herdr-pool broadcast`, opt-in delivery
+  toasts (`HERDR_POOL_NOTIFY_DELIVERY`).
+- **Decided against**: `agent.view.set` attention projection — its filter
+  fields (`status`, `workspace_id`, tokens) cannot see pool state, and a
+  plugin-owned view would hijack the user's agent panel ordering.
+- **Later**: Windows named-pipe transport, cross-machine relays (explicitly
+  out of MVP scope).
 
 ## 7. Open questions / decisions to lock in beads
 
