@@ -25,6 +25,15 @@ title = "Messaging inbox"
 contexts = ["workspace"]
 command = ["herdr-pool", "inbox"]
 
+# Left-docked inbox panel: `herdr-pool panel toggle` opens it as a narrow
+# left split in the current tab (close when focused, focus when open).
+# Bind a key in config.toml: `herdr plugin action invoke panel-toggle`.
+[[actions]]
+id = "panel-toggle"
+title = "Toggle messaging panel"
+contexts = ["workspace"]
+command = ["herdr-pool", "panel", "toggle"]
+
 [[panes]]
 id = "inbox"
 title = "Messaging inbox"
@@ -33,3 +42,25 @@ placement = "popup"
 width = "80%"
 height = 20
 command = ["herdr-pool", "inbox", "--follow"]
+
+# Left-docked panel entrypoint (opened via `plugin.pane.open` by
+# `herdr-pool panel`, never directly by users).
+[[panes]]
+id = "panel"
+title = "Pool"
+platforms = ["linux", "macos"]
+placement = "split"
+command = ["herdr-pool", "inbox", "--follow"]
+
+# Panel autostart (`[panel] autostart` in config.toml): dock the inbox
+# panel into each newly created tab/workspace. `panel ensure` no-ops when
+# the setting is off, so these hooks are cheap when disabled.
+[[events]]
+on = "tab.created"
+platforms = ["linux", "macos"]
+command = ["herdr-pool", "panel", "ensure"]
+
+[[events]]
+on = "workspace.created"
+platforms = ["linux", "macos"]
+command = ["herdr-pool", "panel", "ensure"]

@@ -100,6 +100,7 @@ fn test_config(state_dir: &std::path::Path, socket: &std::path::Path) -> DaemonC
         delivery_poll: Duration::from_millis(50),
         event_wakeup: Duration::from_millis(200),
         notify_on_delivery: false,
+        bootstrap_enabled: true,
     }
 }
 

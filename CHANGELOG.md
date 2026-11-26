@@ -9,6 +9,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Left-docked messaging panel: `herdr-pool panel open|close|toggle|status`
+  docks a narrow (~34 col) left split pane running `herdr-pool inbox
+  --follow` into the current tab, using `plugin.pane.open` + `pane.swap` +
+  `pane.resize` over the socket API (per-tab state under
+  `<state>/panel/<tab_id>`, label fallback when the file is lost). The
+  `panel-toggle` plugin action wraps it for keybindings, and `panel
+  ensure` backs new `tab.created`/`workspace.created` `[[events]]` hooks
+  gated by `[panel] autostart`.
+- `config.toml` (`<config>/herdr-cross-session-messaging/`):
+  `[bootstrap] enabled` toggles the auto bootstrap prompt to new agents,
+  `[panel] autostart`/`width` control the panel. `HERDR_POOL_BOOTSTRAP`,
+  `HERDR_POOL_PANEL_AUTOSTART`, `HERDR_POOL_PANEL_WIDTH` override per
+  setting; a missing/malformed file falls back to defaults.
 - `herdr-pool broadcast <text>` — send one message to every live peer in the
   scope (own thread per recipient), with per-recipient delivery results.
 - Plugin popup inbox: `[[panes]] inbox` (`placement = "popup"`, 80%×20)
@@ -67,20 +80,27 @@ All notable changes to this project are documented here. The format follows
   delivery attempts (used for `agent_blocked`).
 - `herdr-pool` agent CLI (`crates/herdr-pool-cli`): `whoami`, `peers`, `send`,
   `broadcast`, `inbox` (+`inbox read`, `--follow`), `reply`, `threads`,
-  `message read|get`, `daemon start|stop|status|logs`, `doctor`, `install`,
+  `message read|get`, `daemon start|stop|status|logs`, `panel
+  open|close|toggle|ensure|status`, `doctor`, `install`,
   `uninstall`, `version`. Global flags `--json`, `--socket-path`,
   `--state-dir`, `-v`.
 - `skills/herdr-messaging/` agent skill (`SKILL.md` +
   `references/commands.md`), embedded into binaries and installed by
   `herdr-pool install [--global]`.
 - `herdr-plugin.toml` plugin manifest with `[[build]]` (`cargo install` of
-  both binaries), `[[startup]]` (`herdr-routerd start`), `open-inbox`
-  workspace action, and the `inbox` popup pane.
+  both binaries), `[[startup]]` (`herdr-routerd start`), `open-inbox` and
+  `panel-toggle` workspace actions, the `inbox` popup pane, the `panel`
+  split entrypoint, and `tab.created`/`workspace.created` ensure hooks.
 - crates.io metadata (keywords/categories) and `version` requirements on
   internal path deps, in preparation for publishing.
 
 ### Fixed
 
+- `herdr-routerd run` built its config via `DaemonConfig::for_state_dir`,
+  which silently disabled `HERDR_POOL_NOTIFY_DELIVERY` (and would have
+  ignored every env/config-file setting); it now uses
+  `DaemonConfig::from_env_at` so env vars and `config.toml` reach the
+  daemon.
 - `agent_id` collision: ids were derived from the timestamp-only prefix of
   uuidv7, so two agents registered in the same millisecond shared an id and
   overwrote each other's registry row. Now the full uuidv7 is used.

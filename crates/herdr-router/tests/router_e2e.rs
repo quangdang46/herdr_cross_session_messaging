@@ -75,6 +75,7 @@ fn test_config(state_dir: &std::path::Path, socket: &std::path::Path) -> DaemonC
         delivery_poll: Duration::from_millis(50),
         event_wakeup: Duration::from_millis(200),
         notify_on_delivery: false,
+        bootstrap_enabled: true,
     }
 }
 
@@ -914,7 +915,7 @@ fn agent_scope_move_retires_stale_record() {
 
     let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
     let pools = Arc::new(Pools::open(state.path()).unwrap());
-    let mut sync = herdr_router::RegistrySync::new(&client, pools.as_ref());
+    let mut sync = herdr_router::RegistrySync::new(&client, pools.as_ref(), true);
 
     // Bootstrap: agent lives in scope A.
     server

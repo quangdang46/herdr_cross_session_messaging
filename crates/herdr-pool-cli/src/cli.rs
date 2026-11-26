@@ -116,6 +116,12 @@ pub enum Command {
         action: DaemonAction,
     },
 
+    /// Manage the left-docked messaging panel (inbox split pane).
+    Panel {
+        #[command(subcommand)]
+        action: PanelAction,
+    },
+
     /// Read-only environment/socket/scope/store diagnostics.
     Doctor {
         /// Project root for skill-dir checks (default: agent cwd / cwd).
@@ -217,4 +223,19 @@ pub enum DaemonAction {
     Status,
     /// Show the daemon log file path and recent lines.
     Logs,
+}
+
+/// Action for `herdr-pool panel`.
+#[derive(Subcommand)]
+pub enum PanelAction {
+    /// Open the panel in this tab (focus it if already open).
+    Open,
+    /// Close the panel in this tab.
+    Close,
+    /// Close it when focused, focus it when open, open it when absent.
+    Toggle,
+    /// Auto-dock hook for `[[events]]`; no-ops unless `[panel] autostart`.
+    Ensure,
+    /// Show panel state for this tab.
+    Status,
 }

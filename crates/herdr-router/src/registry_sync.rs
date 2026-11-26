@@ -129,11 +129,11 @@ pub struct RegistrySync<'a> {
 }
 
 impl<'a> RegistrySync<'a> {
-    pub fn new(client: &'a HerdrClient, pools: &'a Pools) -> Self {
+    pub fn new(client: &'a HerdrClient, pools: &'a Pools, bootstrap_enabled: bool) -> Self {
         Self {
             client,
             pools,
-            bootstrap: Bootstrapper::new(client),
+            bootstrap: Bootstrapper::new(client, bootstrap_enabled),
             watched: BTreeSet::new(),
             subs_dirty: false,
             delivery_nudge: false,
@@ -681,9 +681,9 @@ impl<'a> RegistrySync<'a> {
 
 /// One-shot reconcile used by `herdr-routerd tick` (plugin `[[events]]`
 /// hooks) — snapshot + registry sync + bootstrap attempts, no daemon.
-pub fn run_tick(client: &HerdrClient, state_dir: &Path) -> Result<usize> {
+pub fn run_tick(client: &HerdrClient, state_dir: &Path, bootstrap_enabled: bool) -> Result<usize> {
     let pools = Pools::open(state_dir)?;
-    let mut sync = RegistrySync::new(client, &pools);
+    let mut sync = RegistrySync::new(client, &pools, bootstrap_enabled);
     let mut synced = sync.sync_snapshot()?;
     synced += sync.reconcile()?;
     sync.refresh_watched();
@@ -712,6 +712,9 @@ pub fn run_tick(client: &HerdrClient, state_dir: &Path) -> Result<usize> {
 /// skill remains the fallback channel.
 pub struct Bootstrapper<'a> {
     client: &'a HerdrClient,
+    /// `[bootstrap] enabled` / `HERDR_POOL_BOOTSTRAP` — when false the
+    /// prompt is never sent (the installed skill remains the channel).
+    enabled: bool,
     /// agent_id → prompt attempts used this run.
     attempts: HashMap<String, u8>,
 }
@@ -720,9 +723,10 @@ impl<'a> Bootstrapper<'a> {
     /// Prompt attempts allowed per agent per daemon run.
     pub const MAX_ATTEMPTS_PER_RUN: u8 = 3;
 
-    fn new(client: &'a HerdrClient) -> Self {
+    fn new(client: &'a HerdrClient, enabled: bool) -> Self {
         Self {
             client,
+            enabled,
             attempts: HashMap::new(),
         }
     }
@@ -738,6 +742,9 @@ impl<'a> Bootstrapper<'a> {
     /// the instruction into a half-restored TUI. The next AgentInfo
     /// sighting (agent.get/list refresh, status change) re-evaluates.
     pub fn maybe_attempt(&mut self, pool: &Arc<PoolStore>, record: &AgentRecord) {
+        if !self.enabled {
+            return;
+        }
         if record.status == STATUS_OFFLINE {
             return;
         }

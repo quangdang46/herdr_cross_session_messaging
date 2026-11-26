@@ -78,6 +78,7 @@ fn run(cli: &cli::Cli) -> Result<(), Failure> {
         cli::Command::Threads => commands::threads::run(&ctx, &proc_env),
         cli::Command::Message { action } => commands::message::run(&ctx, &proc_env, action),
         cli::Command::Daemon { action } => commands::daemon::run(&ctx, action),
+        cli::Command::Panel { action } => commands::panel::run(&ctx, &proc_env, action),
         cli::Command::Doctor { project } => {
             commands::doctor::run(&ctx, &proc_env, project.as_deref())
         }

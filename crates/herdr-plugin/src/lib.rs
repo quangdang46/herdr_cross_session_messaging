@@ -9,6 +9,7 @@
 // are exempted per-module below.
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+pub mod config;
 pub mod error;
 pub mod manifest;
 pub mod paths;

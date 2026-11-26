@@ -8,6 +8,7 @@ pub mod doctor;
 pub mod inbox;
 pub mod install;
 pub mod message;
+pub mod panel;
 pub mod peers;
 pub mod reply;
 pub mod rescue;

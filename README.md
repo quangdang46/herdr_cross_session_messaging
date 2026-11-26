@@ -111,7 +111,22 @@ herdr plugin install quangdang46/herdr_cross_session_messaging
 The plugin's `[[startup]]` hook runs `herdr-routerd start` automatically after
 Herdr restore/live-handoff, so the daemon is already up before agents send.
 The plugin also ships an `open-inbox` workspace action
-(`herdr plugin action invoke …`) for quick inbox access.
+(`herdr plugin action invoke …`) for quick inbox access, and a
+`panel-toggle` action that docks a narrow **left split pane** running the
+live inbox into the current tab — bind it in `~/.config/herdr/config.toml`:
+
+```toml
+[[keys.command]]
+key = "cmd+i"
+type = "shell"
+command = "herdr plugin action invoke panel-toggle --plugin herdr.cross-session-messaging"
+```
+
+Toggle semantics: closed → open+dock (34 cols, left edge); open but not
+focused → focus; focused → close. `herdr-pool panel open|close|status` does
+the same from a shell. Per-tab state lives under
+`<state>/panel/<tab_id>`; the panel re-discovers itself by label if the
+state file is lost.
 
 **Binaries on PATH** (the plugin needs `herdr-pool` and `herdr-routerd`
 findable — `herdr plugin install`'s `[[build]]` commands handle this via
@@ -215,6 +230,8 @@ Global flags on every subcommand: `--json`, `--socket-path <PATH>`,
 | `threads [--json]` | Per-thread summaries for the scope |
 | `message read <msg_id>` / `message get <msg_id>` | Acknowledge+print, or fetch the full record as JSON |
 | `daemon start\|stop\|status\|logs` | Manage the `herdr-routerd` delivery daemon |
+| `panel open\|close\|toggle\|status` | Manage the left-docked inbox panel (split pane, per tab) |
+| `panel ensure` | `[[events]]` autostart hook — docks the panel on new tabs when `[panel] autostart` is on |
 | `doctor [--project <dir>] [--json]` | Env / socket / scope / DB / daemon / skill health checks |
 | `install [--global] [--agent <kind>] [--project <dir>]` | Install the `herdr-messaging` skill into agent skill dirs |
 | `uninstall [--global] [--agent <kind>] [--project <dir>]` | Remove only marker-owned skill dirs |
@@ -283,6 +300,21 @@ in the pool.
   `<state>/logs/routerd.log` and recent lines.
 - **Daemon env**: `HERDR_POOL_NOTIFY_DELIVERY=1` toasts the user on every
   successful delivery (off by default — agents already get prompted).
+- **Config file**: `<config>/herdr-cross-session-messaging/config.toml`
+  (`~/.config/…` by default; `HERDR_POOL_CONFIG_DIR` /
+  `HERDR_PLUGIN_CONFIG_DIR` override the directory):
+
+  ```toml
+  [bootstrap]
+  enabled = false   # stop the auto [herdr-pool] bootstrap prompt to new agents
+
+  [panel]
+  autostart = true  # dock the inbox panel on every new tab/workspace
+  width = 36        # preferred panel width in columns (24–80, default 34)
+  ```
+
+  Env overrides win over the file: `HERDR_POOL_BOOTSTRAP`,
+  `HERDR_POOL_PANEL_AUTOSTART`, `HERDR_POOL_PANEL_WIDTH`.
 - **CLI overrides**: `--socket-path`, `--state-dir` on any `herdr-pool`
   command; `-v` for debug logging (`RUST_LOG`/`HERDR_LOG` respected).
 - **Skill payload**: embedded in the binary at build time

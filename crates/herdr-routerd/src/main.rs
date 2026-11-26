@@ -174,7 +174,8 @@ fn cmd_status() -> Result<()> {
 fn cmd_tick() -> Result<()> {
     let state_dir = state_dir()?;
     let client = HerdrClient::new().context("resolve Herdr socket")?;
-    let synced = run_tick(&client, &state_dir)?;
+    let bootstrap_enabled = herdr_plugin::config::PoolConfig::load().bootstrap_enabled;
+    let synced = run_tick(&client, &state_dir, bootstrap_enabled)?;
     println!("tick: synced {synced} agents");
     Ok(())
 }
@@ -223,7 +224,9 @@ fn cmd_run() -> Result<()> {
 
     ensure_skill_installed();
 
-    let config = DaemonConfig::for_state_dir(state_dir.clone());
+    // from_env_at (not for_state_dir) so HERDR_POOL_NOTIFY_DELIVERY and the
+    // config.toml bootstrap toggle actually reach the running daemon.
+    let config = DaemonConfig::from_env_at(state_dir.clone())?;
     let result = Daemon::new(config).and_then(|daemon| daemon.run());
     remove_pid_file(&state_dir);
     if let Err(err) = &result {

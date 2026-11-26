@@ -87,6 +87,9 @@ pub struct DaemonConfig {
     /// Toast the user on each delivered message
     /// (`HERDR_POOL_NOTIFY_DELIVERY=1|true|yes`).
     pub notify_on_delivery: bool,
+    /// Auto-send the `[herdr-pool] bootstrap` prompt to new agents
+    /// (`[bootstrap] enabled` in config.toml / `HERDR_POOL_BOOTSTRAP`).
+    pub bootstrap_enabled: bool,
 }
 
 impl DaemonConfig {
@@ -99,16 +102,24 @@ impl DaemonConfig {
             delivery_poll: DEFAULT_POLL_INTERVAL,
             event_wakeup: EVENT_WAKEUP,
             notify_on_delivery: false,
+            bootstrap_enabled: true,
         }
     }
 
     /// Config from the process environment (`HERDR_POOL_STATE_DIR` →
     /// XDG → home), socket from env.
     pub fn from_env() -> Result<Self> {
-        let mut config = Self::for_state_dir(plugin_state_dir()?);
+        Self::from_env_at(plugin_state_dir()?)
+    }
+
+    /// Config from the process environment rooted at an explicit state dir
+    /// (pool config file + `HERDR_POOL_*` overrides still apply).
+    pub fn from_env_at(state_dir: PathBuf) -> Result<Self> {
+        let mut config = Self::for_state_dir(state_dir);
         config.notify_on_delivery = std::env::var("HERDR_POOL_NOTIFY_DELIVERY")
             .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
             .unwrap_or(false);
+        config.bootstrap_enabled = herdr_plugin::config::PoolConfig::load().bootstrap_enabled;
         Ok(config)
     }
 }
@@ -238,7 +249,11 @@ impl Daemon {
 
     /// Event-loop thread: snapshot → subscribe → dispatch → reconnect.
     fn event_loop(&self) {
-        let mut sync = RegistrySync::new(&self.event_client, self.pools.as_ref());
+        let mut sync = RegistrySync::new(
+            &self.event_client,
+            self.pools.as_ref(),
+            self.config.bootstrap_enabled,
+        );
         let mut backoff = INITIAL_BACKOFF;
         loop {
             if self.should_stop() {
