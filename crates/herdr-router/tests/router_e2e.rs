@@ -404,6 +404,82 @@ fn delivery_worker_blocked_backoff_is_recorded() {
 }
 
 #[test]
+fn delivery_worker_blocked_escalates_to_peer_helper() {
+    // A recipient blocked past the escalation delay triggers one peer-assist
+    // prompt to another live agent in the same scope.
+    let server = FakeHerdr::start().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+
+    let pools = Arc::new(Pools::open(state.path()).unwrap());
+    let pool = pools
+        .for_scope_key("0123456789abcdef0123456789abcdef", project.path())
+        .unwrap();
+    let record =
+        |agent_id: &str, pane_id: &str, name: Option<&str>| herdr_pool_store::AgentRecord {
+            agent_id: agent_id.into(),
+            scope_key: "0123456789abcdef0123456789abcdef".into(),
+            terminal_id: Some(format!("term_{agent_id}")),
+            pane_id: Some(pane_id.into()),
+            agent_kind: Some("claude".into()),
+            name: name.map(str::to_string),
+            cwd: None,
+            status: "idle".into(),
+            bootstrap_version: None,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            offline_at: None,
+        };
+    pool.registry()
+        .upsert_agent(&record("ag_target", "w9:p9", Some("target")))
+        .unwrap();
+    pool.registry()
+        .upsert_agent(&record("ag_helper", "w9:p8", Some("helper")))
+        .unwrap();
+    pool.messages()
+        .send("ag_sender", "ag_target", "escalation test")
+        .unwrap();
+
+    server.on("agent.prompt").then(|req| {
+        if req.params["target"] == "w9:p9" {
+            herdr_testkit::HandlerReply::Error {
+                code: "agent_blocked".into(),
+                message: "busy".into(),
+            }
+        } else {
+            herdr_testkit::HandlerReply::Result(herdr_testkit::canned_result("agent_prompted"))
+        }
+    });
+
+    let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
+    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = DeliveryWorker::new(
+        client,
+        pools,
+        shutdown,
+        Notify::default(),
+        Duration::from_millis(10),
+    )
+    .with_blocked_escalate_after(Duration::ZERO);
+    assert_eq!(worker.drain_once().unwrap(), 1);
+
+    let prompts = server.requests_for("agent.prompt");
+    assert_eq!(
+        prompts.len(),
+        2,
+        "delivery + escalation prompts: {prompts:?}"
+    );
+    assert_eq!(prompts[0].params["target"], "w9:p9");
+    assert_eq!(prompts[1].params["target"], "w9:p8");
+    let assist = prompts[1].params["text"].as_str().unwrap();
+    assert!(assist.contains("rescue assist"), "{assist}");
+    assert!(assist.contains("ag_target"), "{assist}");
+
+    // Second drain: message still deferred, no duplicate escalation.
+    assert_eq!(worker.drain_once().unwrap(), 0);
+}
+
+#[test]
 fn agent_scope_move_retires_stale_record() {
     // Same terminal_id re-appearing under a different project cwd must not
     // leave a live ghost record in the old scope's registry.
