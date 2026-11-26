@@ -244,6 +244,38 @@ fn send_blocked_agent_leaves_retry_scheduled() {
 }
 
 #[test]
+fn send_to_not_ready_agent_defers_without_prompting() {
+    let f = Fixture::new();
+    let cwd = f.project_cwd();
+    f.script_self("w1:p1", "term_self", &cwd);
+    // Peer TUI is still launching/resuming: interactive_ready=false.
+    let mut peer = agent_value("w1:p2", "term_peer", "codex", Some("peer"), &cwd, "idle");
+    peer["interactive_ready"] = json!(false);
+    f.script_agent_get("w1:p2", peer.clone());
+    f.script_agent_list(vec![
+        agent_value("w1:p1", "term_self", "claude", Some("self"), &cwd, "idle"),
+        peer,
+    ]);
+    let ctx = f.ctx();
+
+    with_env!(f, "w1:p1", |env| send::run(
+        &ctx, env, "peer", "hello?", None
+    ))
+    .unwrap();
+
+    // No prompt may be sent to a half-restored TUI — the message waits for
+    // the daemon, deferred without consuming an attempt.
+    assert!(f.server.requests_for("agent.prompt").is_empty());
+    let pool = open_pool(f.state.path(), f.project.path()).unwrap();
+    let peer_id = peer_agent_id(&pool);
+    let inbox = pool.pool.messages().inbox(&peer_id, false).unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].status, herdr_pool_store::MessageStatus::Pending);
+    assert!(inbox[0].next_retry_at.is_some());
+    assert_eq!(inbox[0].attempt_count, 0);
+}
+
+#[test]
 fn send_unknown_peer_is_usage_error() {
     let f = Fixture::new();
     f.script_two_agents();

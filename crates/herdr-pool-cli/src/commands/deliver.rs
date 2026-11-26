@@ -9,7 +9,7 @@
 
 use herdr_pool_core::PoolContext;
 use herdr_pool_store::{AgentRecord, Message};
-use herdr_router::delivery::{retry_delay, BLOCKED_BACKOFF};
+use herdr_router::delivery::{retry_delay, BLOCKED_BACKOFF, NOT_READY_BACKOFF};
 use herdr_router::envelope::message_envelope;
 
 use crate::context::{delivery_target, now_millis, CmdResult, Ctx, Failure};
@@ -34,6 +34,16 @@ pub fn deliver(
             msg.to_agent
         ))
     })?;
+
+    // The recipient's TUI is still launching or mid `--resume` — prompting
+    // now could paste the envelope into a half-restored UI. Same policy as
+    // the delivery worker: defer without consuming an attempt.
+    if !recipient.interactive_ready || recipient.launch_pending {
+        let next = now_millis() + NOT_READY_BACKOFF.as_millis() as i64;
+        messages.defer(&msg.id, Some(next))?;
+        tracing::debug!(message = %msg.id, "recipient not interactive-ready; deferred");
+        return Ok(messages.message(&msg.id)?.unwrap_or_else(|| msg.clone()));
+    }
 
     let Some(target) = delivery_target(&recipient) else {
         // No pane/terminal to prompt: leave pending for the daemon, which

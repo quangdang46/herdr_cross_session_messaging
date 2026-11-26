@@ -108,6 +108,10 @@ All notable changes to this project are documented here. The format follows
 - Bootstrap prompt budget no longer burns on `agent_blocked`/
   `agent_not_ready` rejections — an agent first seen while blocked can
   still be bootstrapped after it unblocks, within the same daemon run.
+- `send`/`reply`/`broadcast` now defer (no attempt consumed) when the
+  recipient's TUI is not `interactive_ready` or `launch_pending` — the
+  CLI direct-delivery path had the same paste-into-half-restored-UI hole
+  the daemon worker just closed.
 - `herdr-routerd run` now auto-installs the `herdr-messaging` skill into the
   global agent skill dirs (`~/.agents/skills`, `~/.claude/skills`) on every
   start — plugin install is now truly one-step; `herdr-pool install` remains
