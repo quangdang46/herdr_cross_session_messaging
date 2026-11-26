@@ -33,6 +33,10 @@ impl HerdrError {
     pub fn is_agent_not_found(&self) -> bool {
         matches!(self, HerdrError::Api { code, .. } if code == "agent_not_found")
     }
+    /// True when a pane target could not be resolved (pane closed/gone).
+    pub fn is_pane_not_found(&self) -> bool {
+        matches!(self, HerdrError::Api { code, .. } if code == "pane_not_found")
+    }
     /// True for timeout-class failures.
     pub fn is_timeout(&self) -> bool {
         matches!(self, HerdrError::Timeout)

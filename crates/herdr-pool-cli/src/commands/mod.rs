@@ -2,6 +2,7 @@
 //! and prints human or `--json` output via [`crate::output`].
 
 pub mod broadcast;
+pub mod clean;
 pub mod daemon;
 pub mod deliver;
 pub mod doctor;

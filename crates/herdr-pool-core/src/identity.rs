@@ -24,9 +24,10 @@ pub const ENV_PANE_ID: &str = "HERDR_PANE_ID";
 pub const ENV_WORKSPACE_ID: &str = "HERDR_WORKSPACE_ID";
 /// Env var carrying the caller's tab id.
 pub const ENV_TAB_ID: &str = "HERDR_TAB_ID";
-/// Env var carrying the plugin invocation context JSON (plugin panes and
-/// popups do not get `HERDR_PANE_ID`; the underlying tiled pane's id is in
-/// `focused_pane_id` here instead).
+/// Env var carrying the plugin invocation context JSON. Plugin panes and
+/// popups get BOTH their own `HERDR_PANE_ID` (the plugin surface's pane,
+/// which is never a messaging identity) AND this JSON, whose
+/// `focused_pane_id` names the underlying tiled agent pane.
 pub const ENV_PLUGIN_CONTEXT_JSON: &str = "HERDR_PLUGIN_CONTEXT_JSON";
 
 /// Pane identity parsed from the Herdr-injected environment.
@@ -35,18 +36,33 @@ pub struct SelfEnv {
     pub pane_id: String,
     pub workspace_id: String,
     pub tab_id: String,
+    /// True when the ids came from `HERDR_PLUGIN_CONTEXT_JSON` (a plugin
+    /// pane/popup) rather than the direct `HERDR_*_ID` vars.
+    pub from_plugin_context: bool,
 }
 
 /// Parse the `HERDR_*` identity vars. All three must be present and
 /// non-empty; a missing var yields [`CoreError::MissingEnv`] — the process
 /// is not running inside a Herdr pane.
 ///
-/// Plugin panes (including popups) are the exception: Herdr injects
-/// `HERDR_PLUGIN_CONTEXT_JSON` instead of the `HERDR_*_ID` vars, with the
-/// underlying tiled pane's id in `focused_pane_id`. When the direct vars are
-/// absent, the context JSON is used as the identity source so pool commands
-/// work inside plugin UIs too.
+/// Plugin panes (including popups) are the exception: they get their own
+/// `HERDR_*_ID` vars AND `HERDR_PLUGIN_CONTEXT_JSON`, whose
+/// `focused_pane_id` names the underlying tiled agent pane. A *parseable*
+/// context therefore wins over the direct vars — the plugin pane's own id
+/// is never the messaging identity. When the context is missing or
+/// malformed, the direct vars are used instead.
 pub fn self_env_from(env: &EnvLookup<'_>) -> Result<SelfEnv> {
+    let mut context_err = None;
+    if let Some(context) = env(ENV_PLUGIN_CONTEXT_JSON)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string_lossy().into_owned())
+    {
+        match plugin_context_env(&context) {
+            Ok(ids) => return Ok(ids),
+            Err(err) => context_err = Some(err),
+        }
+    }
+
     let pane_id = env_value(env, ENV_PANE_ID);
     let workspace_id = env_value(env, ENV_WORKSPACE_ID);
     let tab_id = env_value(env, ENV_TAB_ID);
@@ -55,14 +71,15 @@ pub fn self_env_from(env: &EnvLookup<'_>) -> Result<SelfEnv> {
             pane_id: pane_id.clone(),
             workspace_id: workspace_id.clone(),
             tab_id: tab_id.clone(),
+            from_plugin_context: false,
         });
     }
 
-    if let Some(context) = env(ENV_PLUGIN_CONTEXT_JSON)
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_string_lossy().into_owned())
-    {
-        return plugin_context_env(&context);
+    // No usable identity at all. A plugin-context error (malformed JSON or
+    // missing context fields) is more informative than a bare missing-var
+    // report, so prefer it when present.
+    if let Some(err) = context_err {
+        return Err(err);
     }
 
     // Report the first missing var so the error names what is absent.
@@ -106,6 +123,7 @@ fn plugin_context_env(context_json: &str) -> Result<SelfEnv> {
         pane_id: pick(ctx.focused_pane_id)?,
         workspace_id: pick(ctx.workspace_id)?,
         tab_id: pick(ctx.tab_id)?,
+        from_plugin_context: true,
     })
 }
 
@@ -214,6 +232,7 @@ mod tests {
         assert_eq!(ids.pane_id, "w1:p1");
         assert_eq!(ids.workspace_id, "w1");
         assert_eq!(ids.tab_id, "w1:t1");
+        assert!(!ids.from_plugin_context);
     }
 
     #[test]
@@ -251,8 +270,8 @@ mod tests {
 
     #[test]
     fn self_env_falls_back_to_plugin_context_json() {
-        // Plugin panes/popups get no HERDR_*_ID vars — only the context JSON
-        // naming the underlying tiled pane.
+        // Plugin panes/popups carry HERDR_PLUGIN_CONTEXT_JSON naming the
+        // underlying tiled pane.
         let e = env(&[(
             ENV_PLUGIN_CONTEXT_JSON,
             r#"{"workspace_id":"w2","tab_id":"w2:t9","focused_pane_id":"w2:p1"}"#,
@@ -261,12 +280,17 @@ mod tests {
         assert_eq!(ids.pane_id, "w2:p1");
         assert_eq!(ids.workspace_id, "w2");
         assert_eq!(ids.tab_id, "w2:t9");
+        assert!(ids.from_plugin_context);
     }
 
     #[test]
-    fn self_env_direct_vars_win_over_plugin_context() {
+    fn self_env_plugin_context_wins_over_direct_vars() {
+        // Plugin panes get BOTH: their own HERDR_*_ID vars (the plugin
+        // surface's pane) and the context JSON (the focused agent pane).
+        // The context must win — the plugin pane id is never a messaging
+        // identity.
         let e = env(&[
-            ("HERDR_PANE_ID", "w1:p1"),
+            ("HERDR_PANE_ID", "w1:pPlugin"),
             ("HERDR_WORKSPACE_ID", "w1"),
             ("HERDR_TAB_ID", "w1:t1"),
             (
@@ -275,7 +299,36 @@ mod tests {
             ),
         ]);
         let ids = self_env_from(&e).unwrap();
+        assert_eq!(ids.pane_id, "w2:p1");
+        assert_eq!(ids.workspace_id, "w2");
+        assert_eq!(ids.tab_id, "w2:t9");
+        assert!(ids.from_plugin_context);
+    }
+
+    #[test]
+    fn self_env_malformed_plugin_context_falls_back_to_direct_vars() {
+        let e = env(&[
+            ("HERDR_PANE_ID", "w1:p1"),
+            ("HERDR_WORKSPACE_ID", "w1"),
+            ("HERDR_TAB_ID", "w1:t1"),
+            (ENV_PLUGIN_CONTEXT_JSON, "not json"),
+        ]);
+        let ids = self_env_from(&e).unwrap();
         assert_eq!(ids.pane_id, "w1:p1");
+        assert!(!ids.from_plugin_context);
+    }
+
+    #[test]
+    fn self_env_incomplete_plugin_context_falls_back_to_direct_vars() {
+        let e = env(&[
+            ("HERDR_PANE_ID", "w1:p1"),
+            ("HERDR_WORKSPACE_ID", "w1"),
+            ("HERDR_TAB_ID", "w1:t1"),
+            (ENV_PLUGIN_CONTEXT_JSON, r#"{"workspace_id":"w2"}"#),
+        ]);
+        let ids = self_env_from(&e).unwrap();
+        assert_eq!(ids.pane_id, "w1:p1");
+        assert!(!ids.from_plugin_context);
     }
 
     #[test]

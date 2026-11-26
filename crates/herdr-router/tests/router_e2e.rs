@@ -33,16 +33,20 @@ fn wait_until(timeout: Duration, what: &str, mut f: impl FnMut() -> bool) -> boo
 }
 
 fn agent_json(cwd: &std::path::Path, status: &str) -> Value {
+    agent_json_on(cwd, status, "w1:p1", "term_a", "builder")
+}
+
+fn agent_json_on(cwd: &std::path::Path, status: &str, pane: &str, term: &str, name: &str) -> Value {
     json!({
-        "pane_id": "w1:p1",
+        "pane_id": pane,
         "workspace_id": "w1",
         "tab_id": "w1:t1",
-        "terminal_id": "term_a",
+        "terminal_id": term,
         "agent_status": status,
         "revision": 1,
         "focused": true,
         "agent": "claude",
-        "name": "builder",
+        "name": name,
         "cwd": cwd.to_string_lossy(),
         "foreground_cwd": cwd.to_string_lossy(),
         "interactive_ready": true,
@@ -954,4 +958,83 @@ fn agent_scope_move_retires_stale_record() {
     let mut statuses: Vec<&str> = after.iter().map(|(_, s)| s.as_str()).collect();
     statuses.sort_unstable();
     assert_eq!(statuses, ["idle", "offline"], "records: {after:?}");
+}
+
+#[test]
+fn dead_watched_pane_is_evicted_and_subscribe_recovers() {
+    // A ghost registry record pointing at a closed pane makes the server
+    // reject events.subscribe with pane_not_found; the daemon must evict
+    // the dead pane and resubscribe in-session instead of backing off
+    // forever.
+    let server = FakeHerdr::start().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+
+    server.on("session.snapshot").respond(snapshot_result(vec![
+        agent_json(project.path(), "idle"),
+        agent_json_on(project.path(), "idle", "w1:pGONE", "term_ghost", "ghost"),
+    ]));
+    server.fail_next(
+        "events.subscribe",
+        "pane_not_found",
+        "pane w1:pGONE not found",
+    );
+
+    let daemon = Arc::new(Daemon::new(test_config(state.path(), server.socket_path())).unwrap());
+    let handle = daemon.spawn().unwrap();
+
+    // The failed subscribe is retried without the dead pane.
+    assert!(
+        wait_until(WAIT, "events.subscribe retry", || {
+            server.requests_for("events.subscribe").len() >= 2
+        }),
+        "expected events.subscribe to be retried after pane_not_found"
+    );
+    let last = server
+        .requests_for("events.subscribe")
+        .into_iter()
+        .last()
+        .unwrap();
+    let subs = last.params["subscriptions"].as_array().unwrap();
+    assert!(
+        subs.iter()
+            .any(|s| s["type"] == "pane.agent_status_changed" && s["pane_id"] == "w1:p1"),
+        "live pane missing from resubscribe: {subs:?}"
+    );
+    assert!(
+        !subs.iter().any(|s| s["pane_id"] == "w1:pGONE"),
+        "dead pane still subscribed: {subs:?}"
+    );
+
+    // The ghost record is offline; the live agent is untouched.
+    let agents = daemon.pools().all()[0]
+        .registry()
+        .list_agents(true)
+        .unwrap();
+    let ghost = agents
+        .iter()
+        .find(|a| a.terminal_id.as_deref() == Some("term_ghost"))
+        .unwrap();
+    assert_eq!(ghost.status, herdr_pool_store::STATUS_OFFLINE);
+    assert_eq!(only_agent(&daemon).pane_id.as_deref(), Some("w1:p1"));
+
+    // The recovered stream still dispatches events.
+    server.push_subscription_event(json!({
+        "event": "pane.agent_status_changed",
+        "data": {
+            "pane_id": "w1:p1",
+            "workspace_id": "w1",
+            "agent_status": "working",
+            "agent": "claude",
+        }
+    }));
+    assert!(
+        wait_until(WAIT, "status -> working", || {
+            only_agent(&daemon).status == "working"
+        }),
+        "status change not applied after recovery"
+    );
+
+    handle.shutdown();
+    handle.join();
 }

@@ -165,6 +165,16 @@ pub enum Command {
         action: RescueAction,
     },
 
+    /// Prune old terminal rows across all project pools (bounds db growth).
+    Clean {
+        /// Only delete rows older than this many days (default 30).
+        #[arg(long, value_name = "DAYS", default_value_t = 30)]
+        older_than: u64,
+        /// Report what would be deleted without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Self-update: `herdr plugin update` + skill reinstall + daemon restart.
     Update {
         /// Plugin id or GitHub source to update.

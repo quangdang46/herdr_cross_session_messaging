@@ -1103,3 +1103,86 @@ fn rescue_redispatch_fences_old_token() {
         .expect("claim b");
     assert_eq!(claimed.status, RescueStatus::Running);
 }
+
+// ---------------------------------------------------------------------------
+// Prune
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prune_removes_terminal_rows_and_reports_counts() {
+    let (_tmp, dir) = state_dir();
+    let scope = "scope-prune";
+    let store = open_store(scope, &dir);
+
+    let mut alice = agent(scope, "alice");
+    alice.status = "offline".to_string();
+    alice.last_seen_at = 1;
+    store.registry().upsert_agent(&alice).unwrap();
+    let mut bob = agent(scope, "bob");
+    bob.status = "offline".to_string();
+    bob.last_seen_at = 1;
+    store.registry().upsert_agent(&bob).unwrap();
+
+    // Acknowledged message -> prunable; its thread empties too.
+    let msg = store
+        .messages()
+        .send(&alice.agent_id, &bob.agent_id, "hi")
+        .expect("send");
+    store.messages().mark_acknowledged(&msg.id).expect("ack");
+
+    // Pending message -> kept, and its agents stay referenced.
+    let mut carol = agent(scope, "carol");
+    carol.status = "offline".to_string();
+    carol.last_seen_at = 1;
+    store.registry().upsert_agent(&carol).unwrap();
+    let mut dave = agent(scope, "dave");
+    dave.status = "offline".to_string();
+    dave.last_seen_at = 1;
+    store.registry().upsert_agent(&dave).unwrap();
+    store
+        .messages()
+        .send(&carol.agent_id, &dave.agent_id, "still live")
+        .expect("send2");
+
+    // Far-future cutoff prunes every terminal row.
+    let report = store.prune(i64::MAX / 2, false).expect("prune");
+    assert_eq!(report.messages_deleted, 1, "only the acked message");
+    assert_eq!(report.agents_deleted, 2, "alice+bob unreferenced");
+    assert_eq!(report.threads_deleted, 1, "alice->bob thread emptied");
+
+    // carol/dave survive: still referenced by the pending message.
+    assert!(store
+        .registry()
+        .get_agent(&carol.agent_id)
+        .expect("get")
+        .is_some());
+    assert!(store
+        .registry()
+        .get_agent(&dave.agent_id)
+        .expect("get")
+        .is_some());
+}
+
+#[test]
+fn prune_dry_run_counts_without_deleting() {
+    let (_tmp, dir) = state_dir();
+    let scope = "scope-prune-dry";
+    let store = open_store(scope, &dir);
+
+    let mut a = agent(scope, "solo");
+    a.status = "offline".to_string();
+    a.last_seen_at = 1;
+    store.registry().upsert_agent(&a).unwrap();
+    let msg = store.messages().send("x", "y", "m").expect("send");
+    store.messages().mark_acknowledged(&msg.id).expect("ack");
+
+    let report = store.prune(i64::MAX / 2, true).expect("dry prune");
+    assert_eq!(report.messages_deleted, 1);
+    assert!(report.dry_run);
+
+    // Nothing was actually deleted.
+    assert!(store.messages().message(&msg.id).expect("get").is_some());
+    let real = store.prune(i64::MAX / 2, false).expect("real prune");
+    assert_eq!(real.messages_deleted, 1);
+    assert!(store.messages().message(&msg.id).expect("get").is_none());
+}

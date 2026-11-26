@@ -22,7 +22,8 @@ pub mod scope;
 
 pub use error::{CoreError, Result};
 pub use identity::{
-    resolve_self, self_env_from, SelfEnv, SelfIdentity, ENV_PANE_ID, ENV_TAB_ID, ENV_WORKSPACE_ID,
+    resolve_self, self_env_from, SelfEnv, SelfIdentity, ENV_PANE_ID, ENV_PLUGIN_CONTEXT_JSON,
+    ENV_TAB_ID, ENV_WORKSPACE_ID,
 };
 pub use pool::{open_pool, PoolContext};
 pub use scope::{

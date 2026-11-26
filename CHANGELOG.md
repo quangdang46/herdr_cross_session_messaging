@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `herdr-pool clean [--older-than DAYS] [--dry-run]` — prune terminal
+  rows across all project pools: `acknowledged`/`dead` messages,
+  unreferenced `offline`/`unknown` agent records, and emptied threads,
+  followed by `VACUUM`. Live mail is never touched.
 - `herdr-pool update [--plugin ID] [--global]` — one-step self-update:
   `herdr plugin update --yes` for GitHub installs, or `git pull --ff-only`
   + `cargo install --path` for locally linked checkouts; then reinstalls

@@ -28,6 +28,16 @@ use crate::registry::RegistryStore;
 use crate::rescue::RescueStore;
 use crate::store::{configure_connection, lock, now_millis, MessageStore};
 
+/// Row counts removed (or that would be removed) by [`PoolStore::prune`].
+#[derive(Debug, Clone)]
+pub struct PruneReport {
+    pub scope_key: String,
+    pub messages_deleted: usize,
+    pub agents_deleted: usize,
+    pub threads_deleted: usize,
+    pub dry_run: bool,
+}
+
 /// Handle to one scope's pool database (`<state>/pools/<scope_key>/pool.db`).
 ///
 /// `Send + Sync`: all access is serialized through an internal
@@ -89,6 +99,54 @@ impl PoolStore {
     /// Borrow the rescue job repository for this scope.
     pub fn rescues(&self) -> RescueStore<'_> {
         RescueStore::new(self)
+    }
+
+    /// Delete old terminal-state rows to bound database growth.
+    ///
+    /// * `messages`: rows in `acknowledged`/`dead` status created before
+    ///   `cutoff_ms` (live `pending`/`delivered`/`failed` mail is kept).
+    /// * `agents`: `offline`/`unknown` records last seen before `cutoff_ms`
+    ///   that no remaining message references (keeps peer names resolvable
+    ///   for surviving history).
+    /// * `threads`: threads left with zero messages.
+    ///
+    /// `dry_run` rolls the transaction back after counting. On a real run
+    /// the db is `VACUUM`ed when anything was deleted.
+    pub fn prune(&self, cutoff_ms: i64, dry_run: bool) -> Result<PruneReport> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let messages = tx.execute(
+            "DELETE FROM messages WHERE status IN ('acknowledged','dead') AND created_at < ?",
+            params![cutoff_ms],
+        )?;
+        let agents = tx.execute(
+            "DELETE FROM agents WHERE status IN ('offline','unknown') \
+             AND last_seen_at < ? \
+             AND agent_id NOT IN ( \
+                 SELECT from_agent FROM messages \
+                 UNION SELECT to_agent FROM messages \
+             )",
+            params![cutoff_ms],
+        )?;
+        let threads = tx.execute(
+            "DELETE FROM threads WHERE thread_id NOT IN (SELECT thread_id FROM messages)",
+            [],
+        )?;
+        if dry_run {
+            drop(tx);
+        } else {
+            tx.commit()?;
+            if messages > 0 || agents > 0 || threads > 0 {
+                conn.execute_batch("VACUUM")?;
+            }
+        }
+        Ok(PruneReport {
+            scope_key: self.scope_key.clone(),
+            messages_deleted: messages,
+            agents_deleted: agents,
+            threads_deleted: threads,
+            dry_run,
+        })
     }
 
     /// Lock the underlying connection. Crate-internal; exposed to sibling

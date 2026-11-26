@@ -42,7 +42,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use herdr_plugin::paths::state_dir as plugin_state_dir;
-use herdr_protocol::{HerdrClient, HerdrError, SubscriptionFrame};
+use herdr_protocol::{HerdrClient, HerdrError, SubscriptionFrame, SubscriptionStream};
 
 use crate::delivery::{DeliveryWorker, DEFAULT_POLL_INTERVAL};
 use crate::error::{Result, RouterError};
@@ -60,6 +60,11 @@ pub const MAX_CONNECT_BACKOFF: Duration = Duration::from_secs(30);
 /// subscribe stream is silent. Also the `SO_RCVTIMEO` on the subscribe
 /// connection — keep it small enough for responsive `stop`.
 pub const EVENT_WAKEUP: Duration = Duration::from_secs(5);
+/// `pane_not_found` eviction rounds tolerated inside one subscribe
+/// session before the error propagates to the outer backoff. Each round
+/// must evict at least one watched pane, so this only trips on a server
+/// that keeps naming panes we cannot resolve.
+const MAX_PANE_EVICTIONS: usize = 8;
 /// pidfile name under the state dir.
 pub const PID_FILE_NAME: &str = "routerd.pid";
 /// instance-lock directory name under the state dir.
@@ -310,11 +315,7 @@ impl Daemon {
             if self.should_stop() {
                 return Ok(SessionEnd::Shutdown);
             }
-            let subs = subscriptions_for(sync.watched_panes());
-            let sub_count = subs.len();
-            let mut stream = self.event_client.events_subscribe(subs)?;
-            sync.acknowledge_subscriptions();
-            tracing::debug!(count = sub_count, "event loop: subscribed");
+            let mut stream = self.subscribe_events(sync)?;
 
             loop {
                 if self.should_stop() {
@@ -358,6 +359,68 @@ impl Daemon {
                 }
             }
         }
+    }
+
+    /// `events.subscribe` with dead-pane eviction. When the server rejects
+    /// the subscription set with `pane_not_found` (a registry record still
+    /// points at a closed pane), the gone pane(s) are identified, their
+    /// records marked offline via [`RegistrySync::evict_dead_pane`], and
+    /// the subscribe retried in-session — no backoff, no re-snapshot.
+    /// Bounded by [`MAX_PANE_EVICTIONS`]; every other error propagates to
+    /// the caller's backoff unchanged.
+    fn subscribe_events(&self, sync: &mut RegistrySync<'_>) -> Result<SubscriptionStream> {
+        for _ in 0..=MAX_PANE_EVICTIONS {
+            let subs = subscriptions_for(sync.watched_panes());
+            let sub_count = subs.len();
+            match self.event_client.events_subscribe(subs) {
+                Ok(stream) => {
+                    sync.acknowledge_subscriptions();
+                    tracing::debug!(count = sub_count, "event loop: subscribed");
+                    return Ok(stream);
+                }
+                Err(HerdrError::Api { code, message }) if code == "pane_not_found" => {
+                    let dead = self.dead_watched_panes(sync, &message);
+                    if dead.is_empty() {
+                        return Err(HerdrError::Api { code, message }.into());
+                    }
+                    for pane in dead {
+                        sync.evict_dead_pane(&pane);
+                    }
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Err(RouterError::Daemon(
+            "events.subscribe kept failing with pane_not_found".into(),
+        ))
+    }
+
+    /// Watched panes the server reports as gone. The `pane_not_found`
+    /// message names the pane ("pane w2:pKZ not found"); a watched id
+    /// appearing as a delimited token is the culprit. When the message
+    /// names nothing we recognize, fall back to probing each watched pane
+    /// with `pane.get` — only an explicit `pane_not_found` answer evicts,
+    /// so transient errors never drop a live pane.
+    fn dead_watched_panes(&self, sync: &RegistrySync<'_>, message: &str) -> Vec<String> {
+        let watched = sync.watched_panes();
+        let named = watched.iter().find(|pane| {
+            message
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == ':' || c == '_' || c == '-'))
+                .any(|token| token == pane.as_str())
+        });
+        if let Some(pane) = named {
+            return vec![pane.clone()];
+        }
+        watched
+            .iter()
+            .filter(|pane| {
+                matches!(
+                    self.event_client.pane_get(pane),
+                    Err(err) if err.is_pane_not_found()
+                )
+            })
+            .cloned()
+            .collect()
     }
 
     /// Route one frame through `RegistrySync` and nudge the delivery

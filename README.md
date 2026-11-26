@@ -188,6 +188,22 @@ with the new binary and restarts `herdr-routerd` if it was running.
 `--json` reports `{plugin, source_kind, version_before, version_after,
 skills_project, skills_global, daemon}`.
 
+### Cleaning up
+
+Pool databases accumulate per project scope. `herdr-pool clean` prunes
+terminal rows older than a cutoff across **all** pools:
+
+```bash
+herdr-pool clean                  # delete acked/dead mail + offline agents >30d
+herdr-pool clean --older-than 7   # tighter window
+herdr-pool clean --dry-run        # preview counts without deleting
+```
+
+It removes `acknowledged`/`dead` messages, `offline`/`unknown` agent
+records that no surviving message references (peer names stay resolvable
+for kept history), and emptied threads — then `VACUUM`s each touched db.
+Live `pending`/`delivered`/`failed` mail is never touched.
+
 ### Agent integrations (`herdr integration install`)
 
 For the best experience — session resume/identity and live agent state —

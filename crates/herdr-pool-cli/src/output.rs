@@ -21,6 +21,8 @@
 //! - `install`/`uninstall`: `{scope, targets: [{path, outcome, reason?}]}`
 //! - `update`: `{plugin, source_kind, version_before, version_after,
 //!   skills_project, skills_global, daemon}`
+//! - `clean`: `{older_than_days, dry_run, pools: [{scope_key, messages,
+//!   agents, threads, error?}], totals}`
 //! - `version`: `{name, version, skill_version}`
 //! - errors (any command, `--json`): `{"error": {"kind", "message"}}`
 

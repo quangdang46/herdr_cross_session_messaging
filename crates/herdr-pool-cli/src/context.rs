@@ -288,6 +288,7 @@ pub fn upsert_self(pool: &PoolContext, identity: &SelfIdentity) -> CmdResult<Age
                 })
         }
     };
+    let had_existing = existing.is_some();
 
     let now = now_millis();
     let record = match &identity.agent {
@@ -338,7 +339,19 @@ pub fn upsert_self(pool: &PoolContext, identity: &SelfIdentity) -> CmdResult<Age
             }
         }
     };
-    registry.upsert_agent(&record)?;
+
+    // Plugin surfaces (panel/popup) resolve identity through
+    // HERDR_PLUGIN_CONTEXT_JSON to the *focused* pane. When that pane
+    // hosts no agent and has no registry record yet, persisting one would
+    // mint a ghost peer — visible in `peers`/`broadcast` but never
+    // promptable. Skip the write; the returned record still gives callers
+    // a self id for this invocation. An existing record is refreshed
+    // as usual (the pane registered itself earlier), and a focused pane
+    // WITH an agent upserts the real agent's record — just `last_seen`.
+    let ghost = identity.env.from_plugin_context && identity.agent.is_none() && !had_existing;
+    if !ghost {
+        registry.upsert_agent(&record)?;
+    }
     Ok(record)
 }
 
@@ -496,4 +509,130 @@ pub fn env_from_map<'a>(
     map: &'a std::collections::HashMap<String, std::ffi::OsString>,
 ) -> impl Fn(&str) -> Option<std::ffi::OsString> + 'a {
     move |key| map.get(key).cloned()
+}
+
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+
+    use herdr_pool_core::ENV_PLUGIN_CONTEXT_JSON;
+
+    use super::*;
+    use crate::testutil::{agent_value, pane_current_result, Fixture};
+
+    /// Enough scripted `pane.current` responders for the socket calls one
+    /// test makes (resolve_self calls it once per command under test).
+    const PANE_DEPTH: usize = 8;
+
+    /// Env map for a plugin pane: the plugin surface's own HERDR_*_ID vars
+    /// plus HERDR_PLUGIN_CONTEXT_JSON naming `focused` as the real pane.
+    fn plugin_env(plugin_pane: &str, focused: &str) -> HashMap<String, OsString> {
+        let ws = focused.split(':').next().unwrap_or("w1");
+        let mut map: HashMap<String, OsString> = [
+            ("HERDR_PANE_ID", plugin_pane),
+            ("HERDR_WORKSPACE_ID", ws),
+            ("HERDR_TAB_ID", &format!("{ws}:t1")),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), OsString::from(v)))
+        .collect();
+        map.insert(
+            ENV_PLUGIN_CONTEXT_JSON.to_string(),
+            OsString::from(format!(
+                r#"{{"workspace_id":"{ws}","tab_id":"{ws}:t1","focused_pane_id":"{focused}"}}"#
+            )),
+        );
+        map
+    }
+
+    fn direct_env(pane: &str) -> HashMap<String, OsString> {
+        let ws = pane.split(':').next().unwrap_or("w1");
+        [
+            ("HERDR_PANE_ID", pane),
+            ("HERDR_WORKSPACE_ID", ws),
+            ("HERDR_TAB_ID", &format!("{ws}:t1")),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), OsString::from(v)))
+        .collect()
+    }
+
+    fn script_pane(f: &Fixture, pane: &str, term: &str, cwd: &str) {
+        let result = pane_current_result(pane, term, cwd);
+        for _ in 0..PANE_DEPTH {
+            f.server.on("pane.current").respond(result.clone());
+        }
+    }
+
+    #[test]
+    fn upsert_self_plugin_context_agent_pane_refreshes_real_agent() {
+        let f = Fixture::new();
+        let cwd = f.project_cwd();
+        script_pane(&f, "w1:p9", "term_agent", &cwd);
+        f.script_agent_get(
+            "w1:p9",
+            agent_value("w1:p9", "term_agent", "claude", Some("agent"), &cwd, "idle"),
+        );
+
+        let ctx = f.ctx();
+        let env_map = plugin_env("w1:pPlugin", "w1:p9");
+        let lookup = env_from_map(&env_map);
+        let identity = resolve_identity(&ctx, &lookup).unwrap();
+        assert!(identity.env.from_plugin_context);
+        assert_eq!(identity.env.pane_id, "w1:p9");
+
+        let pool = open_identity_pool(&ctx, &identity).unwrap();
+        let record = upsert_self(&pool, &identity).unwrap();
+        assert_eq!(record.pane_id.as_deref(), Some("w1:p9"));
+
+        let stored = pool.pool.registry().list_agents(false).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].agent_id, record.agent_id);
+        assert_eq!(stored[0].agent_kind.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn upsert_self_plugin_context_shell_pane_mints_no_ghost() {
+        let f = Fixture::new();
+        let cwd = f.project_cwd();
+        // Focused pane exists but hosts no agent (agent.get → not found).
+        script_pane(&f, "w1:p9", "term_shell", &cwd);
+
+        let ctx = f.ctx();
+        let env_map = plugin_env("w1:pPlugin", "w1:p9");
+        let lookup = env_from_map(&env_map);
+        let identity = resolve_identity(&ctx, &lookup).unwrap();
+        assert!(identity.env.from_plugin_context);
+        assert!(identity.agent.is_none());
+
+        let pool = open_identity_pool(&ctx, &identity).unwrap();
+        let record = upsert_self(&pool, &identity).unwrap();
+        assert!(record.agent_id.starts_with("ag_"));
+
+        // Nothing persisted: the plugin surface must not appear as a peer.
+        assert!(pool.pool.registry().list_agents(false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn upsert_self_direct_env_shell_pane_still_registers() {
+        let f = Fixture::new();
+        let cwd = f.project_cwd();
+        script_pane(&f, "w1:p9", "term_shell", &cwd);
+
+        let ctx = f.ctx();
+        let env_map = direct_env("w1:p9");
+        let lookup = env_from_map(&env_map);
+        let identity = resolve_identity(&ctx, &lookup).unwrap();
+        assert!(!identity.env.from_plugin_context);
+        assert!(identity.agent.is_none());
+
+        let pool = open_identity_pool(&ctx, &identity).unwrap();
+        upsert_self(&pool, &identity).unwrap();
+
+        // Plain shell panes invoked directly stay addressable — only the
+        // plugin-context path skips the write.
+        assert_eq!(pool.pool.registry().list_agents(false).unwrap().len(), 1);
+    }
 }

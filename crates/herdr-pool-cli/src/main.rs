@@ -104,6 +104,10 @@ fn run(cli: &cli::Cli) -> Result<(), Failure> {
             agents,
             project.as_deref(),
         ),
+        cli::Command::Clean {
+            older_than,
+            dry_run,
+        } => commands::clean::run(&ctx, *older_than, *dry_run),
         cli::Command::Update { plugin, global } => commands::update::run(&ctx, plugin, *global),
         cli::Command::Version => commands::version::run(&ctx),
     }

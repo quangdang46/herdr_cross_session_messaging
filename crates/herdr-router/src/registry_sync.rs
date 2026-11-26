@@ -448,6 +448,18 @@ impl<'a> RegistrySync<'a> {
         }
     }
 
+    /// Evict a pane the server reported gone (`pane_not_found`): mark every
+    /// live record bound to it offline and rebuild the watched set so
+    /// `refresh_watched` cannot re-add it. The pane is also dropped from
+    /// `watched` unconditionally — a dead pane must never stay subscribed
+    /// even if the offline write failed.
+    pub fn evict_dead_pane(&mut self, pane_id: &str) {
+        self.mark_offline_pane(pane_id);
+        self.refresh_watched();
+        self.watched.remove(pane_id);
+        tracing::info!(pane = %pane_id, "evicted dead watched pane");
+    }
+
     /// Update only the stored status for the live agent on `pane_id`.
     /// Falls back to a full `agent.get` refresh when the pane is unknown —
     /// a status change can be the first signal we see for a new agent.
