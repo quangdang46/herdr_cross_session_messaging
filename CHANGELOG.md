@@ -70,6 +70,19 @@ All notable changes to this project are documented here. The format follows
 - Bootstrap prompt budget no longer burns on `agent_blocked`/
   `agent_not_ready` rejections — an agent first seen while blocked can
   still be bootstrapped after it unblocks, within the same daemon run.
+- `herdr-routerd run` now auto-installs the `herdr-messaging` skill into the
+  global agent skill dirs (`~/.agents/skills`, `~/.claude/skills`) on every
+  start — plugin install is now truly one-step; `herdr-pool install` remains
+  for manual/project-local installs. Conflicts are logged, never clobbered.
+- `HERDR_POOL_SCOPE_MODE=git` scopes agents by the nearest git toplevel
+  (`.git` dir or file) instead of the pane launch cwd, so agents launched in
+  different subdirectories of one repo share a pool. Default stays `cwd`.
+- `skills/herdr-messaging/` is now the single committed skill source; the
+  `.agents/` and `.claude/` copies are installer output, gitignored. A test
+  asserts the embedded payload covers every file in the source dir.
+- `SKILL.md` anti-pattern no longer claims broadcast does not exist (the CLI
+  ships `herdr-pool broadcast`); it now restricts broadcast to explicit
+  user-requested all-peer notifications. Skill payload version 0.3.0.
 
 ### Changed
 

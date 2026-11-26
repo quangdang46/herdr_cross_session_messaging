@@ -138,16 +138,19 @@ export PATH="$PWD/target/release:$PATH"
 — the rest are `publish = false` until the embedded skill payload moves into
 `herdr-plugin`; see CHANGELOG.md.)
 
-**Agent skill:** once `herdr-pool` is on PATH, install the
-`herdr-messaging` skill into agent skill dirs:
+**Agent skill:** installed automatically — `herdr-routerd` (spawned by the
+plugin `[[startup]]` hook) installs the `herdr-messaging` skill into the
+global agent skill dirs (`~/.agents/skills`, `~/.claude/skills`) on every
+start, refreshing it when the payload changes and never overwriting
+user-modified dirs (marker file `.herdr-messaging-managed`). To install or
+refresh manually — e.g. project-local copies or a specific root:
 
 ```bash
 herdr-pool install            # project-local (.agents/skills, .claude/skills)
 herdr-pool install --global   # per-user (~/.agents/skills, ~/.claude/skills)
 ```
 
-The installer never overwrites user-modified dirs (marker file
-`.herdr-messaging-managed`); `herdr-pool uninstall` removes only what it owns.
+`herdr-pool uninstall` removes only what the installer owns.
 
 ### Agent integrations (`herdr integration install`)
 
@@ -334,21 +337,26 @@ binaries), `skills/herdr-messaging/` (agent skill payload).
 | `agent_blocked` on delivery | Recipient agent is permission-blocked | Message stays queued; peer (or user) must clear the block |
 | Daemon won't start, lock error | Stale pidfile or second instance | `herdr-routerd status`; remove stale pid under `<state>/` if crashed |
 | `HERDR_ENV` unset in your shell | You're not inside a managed Herdr pane | Messaging only works inside Herdr panes |
-| Agents never see the skill | `herdr-pool install` not run | Run `herdr-pool install` (or `--global`) in the project; `doctor` reports skill-dir status |
+| Agents never see the skill | Daemon hasn't run since install, or a user-owned dir conflicts | Restart the daemon (`herdr-routerd start` re-installs globally); run `herdr-pool install` manually; `doctor` reports skill-dir status |
 
 ## Limitations
 
 - **Pre-release (0.1.0)** — the full MVP surface is implemented, but the wire
   protocol and CLI are still stabilizing; expect breaking changes before 1.0.
-- **No broadcast** — MVP is strictly peer-to-peer, one recipient per message.
+- **Broadcast is user-gated** — `herdr-pool broadcast` exists but the shipped
+  skill restricts it to explicit "notify all" requests; normal messaging is
+  peer-to-peer, one recipient per `send`/`reply`.
 - **No cross-machine** — everything is local to one Herdr server / Unix socket.
 - **No LLM classification, no orchestration** — this is a message pipe, not a
   manager. Routing decisions stay with the agents and the user.
 - **Unix only for now** — Windows named-pipe transport is designed but deferred.
-- **Blocked-agent rescue is Phase 2** — the daemon queues for blocked peers
-  rather than driving `send_keys` recovery.
-- **Scope = pane launch cwd**, not per-process cwd — agents launched in a
-  subdirectory share the pane's scope deliberately.
+- **Rescue assists, doesn't fix** — on `agent_blocked` the daemon defers mail,
+  snapshots the pane tail, toasts the user, and after 5 min asks a peer to
+  check on the stuck agent. It never sends keys or approves permissions.
+- **Scope = pane launch cwd** by default — agents launched in a subdirectory
+  get their own scope. Set `HERDR_POOL_SCOPE_MODE=git` to scope by the nearest
+  git toplevel instead, so subdirectories of one repo share a pool (agents
+  outside any repo still scope by launch cwd).
 
 ## FAQ
 
@@ -370,10 +378,12 @@ No. Everything is local: SQLite under the pool state dir, Unix socket to the
 local Herdr server. No network egress.
 
 **How do agents learn about this?**
-The plugin ships `skills/herdr-messaging/SKILL.md`, auto-installed into agent
-skill dirs (`.agents/skills/`, `.claude/skills/`, or global with `--global`)
-by `herdr-pool install` / the installer in `herdr-plugin`. Marker file
-`.herdr-messaging-managed` prevents overwriting user edits.
+The plugin ships `skills/herdr-messaging/SKILL.md` — the single source of
+truth; `.agents/` and `.claude/` copies are installer output and are not
+committed. `herdr-routerd` auto-installs it into the global agent skill dirs
+on daemon start; `herdr-pool install [--global] [--project <dir>]` does it
+manually. Marker file `.herdr-messaging-managed` prevents overwriting user
+edits.
 
 **Why sync Rust instead of async?**
 One request per Herdr socket connection, `rusqlite` is sync anyway, and the
@@ -382,10 +392,12 @@ threads are sufficient and keep the dep tree small.
 
 ## Roadmap
 
-- **Phase 2 — blocked-agent rescue**: daemon already defers `agent_blocked`
-  mail without consuming attempts and now snapshots the pane tail into the
-  log plus a throttled `notification.show` toast. Remaining: peer-assist
-  (another agent analyzes the snapshot and suggests/executes a nudge).
+- **Phase 2 — blocked-agent rescue**: shipped — the daemon defers
+  `agent_blocked` mail without consuming attempts, snapshots the pane tail
+  into the log, shows a throttled `notification.show` toast, and after 5 min
+  of continuous blocking asks a peer agent to check on the stuck one. It
+  never sends keys or approves permissions; deeper autonomous recovery
+  (permission dialogs, crash loops) remains open.
 - **Phase 3 — inbox UI**: popup pane shipped (`[[panes]] inbox`,
   `herdr plugin pane open --plugin herdr.cross-session-messaging
   --entrypoint inbox`) rendering `herdr-pool inbox --follow`; identity inside
