@@ -5,7 +5,7 @@ license: MIT OR Apache-2.0
 compatibility: Requires Herdr (HERDR_ENV=1 inside a managed pane) and the herdr-pool CLI on PATH.
 metadata:
   author: herdr-cross-session-messaging
-  version: 0.1.0
+  version: 0.2.0
 ---
 
 # Herdr Cross-Session Messaging

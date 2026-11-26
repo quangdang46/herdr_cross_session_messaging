@@ -181,6 +181,7 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, project: Option<&Path>) -> CmdResult<
                         SkillScope::Global => "skills.global",
                     };
                     let mut installed = 0usize;
+                    let mut outdated = 0usize;
                     let mut modified = 0usize;
                     let mut unmanaged = 0usize;
                     let mut missing = 0usize;
@@ -190,6 +191,10 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, project: Option<&Path>) -> CmdResult<
                             TargetStatus::Installed { version, .. } => {
                                 installed += 1;
                                 detail_parts.push(format!("installed v{version}"));
+                            }
+                            TargetStatus::Outdated { version, .. } => {
+                                outdated += 1;
+                                detail_parts.push(format!("outdated v{version}"));
                             }
                             TargetStatus::Modified { version, .. } => {
                                 modified += 1;
@@ -202,7 +207,7 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, project: Option<&Path>) -> CmdResult<
                             TargetStatus::Missing { .. } => missing += 1,
                         }
                     }
-                    let status = if unmanaged > 0 || modified > 0 {
+                    let status = if unmanaged > 0 || modified > 0 || outdated > 0 {
                         CheckStatus::Warn
                     } else if installed > 0 {
                         CheckStatus::Ok

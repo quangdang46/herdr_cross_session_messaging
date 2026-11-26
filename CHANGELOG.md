@@ -63,6 +63,10 @@ All notable changes to this project are documented here. The format follows
 - Agents whose resolved scope changes (terminal reused in another project)
   no longer leave a live ghost record in the old scope's registry.
 - `inbox --follow` survives transient store errors instead of exiting.
+- `herdr-pool install` now refreshes marker-owned skill installs whose
+  payload content changed without a `SKILL_VERSION` bump (previously
+  reported `already_installed` and left stale files). `doctor` reports such
+  targets as `outdated`.
 
 ### Changed
 

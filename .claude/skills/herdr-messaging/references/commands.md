@@ -152,7 +152,7 @@ Manage the `herdr-routerd` delivery daemon. Equivalent to running
 - `logs` — print the daemon log file path and recent lines.
 
 The daemon is normally spawned by the plugin `[[startup]]` hook; single
-instance is enforced via pidfile/lock under the plugin state dir. Use
+instance is enforced via pidfile/lock under the pool state dir. Use
 `herdr-pool doctor` to check liveness instead of starting a second copy.
 
 ## doctor

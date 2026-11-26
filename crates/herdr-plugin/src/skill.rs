@@ -112,6 +112,9 @@ impl InstallOutcome {
 pub enum TargetStatus {
     /// Marker present, contents match, version recorded.
     Installed { path: PathBuf, version: String },
+    /// Marker present, contents match the marker, but the embedded payload
+    /// is newer (installed before the last payload change).
+    Outdated { path: PathBuf, version: String },
     /// Marker present but contents were modified after install.
     Modified { path: PathBuf, version: String },
     /// Directory exists without our marker — user-owned.
@@ -125,6 +128,7 @@ impl TargetStatus {
     pub fn path(&self) -> &Path {
         match self {
             TargetStatus::Installed { path, .. }
+            | TargetStatus::Outdated { path, .. }
             | TargetStatus::Modified { path, .. }
             | TargetStatus::Unmanaged { path }
             | TargetStatus::Missing { path } => path,
@@ -343,9 +347,16 @@ fn status_one(dir: &Path) -> TargetStatus {
         }
     };
     if installed_payload_sha256(dir) == marker.sha256 {
-        TargetStatus::Installed {
-            path: dir.to_path_buf(),
-            version: marker.version,
+        if marker.sha256 == payload_sha256() {
+            TargetStatus::Installed {
+                path: dir.to_path_buf(),
+                version: marker.version,
+            }
+        } else {
+            TargetStatus::Outdated {
+                path: dir.to_path_buf(),
+                version: marker.version,
+            }
         }
     } else {
         TargetStatus::Modified {
@@ -382,13 +393,15 @@ fn install_one(dir: &Path) -> Result<TargetOutcome> {
         });
     }
 
-    if marker.version == SKILL_VERSION {
+    // Payload content can change without a SKILL_VERSION bump; refresh whenever
+    // the recorded hash or version differs from what this binary embeds.
+    if marker.version == SKILL_VERSION && marker.sha256 == payload_sha256() {
         return Ok(TargetOutcome::AlreadyInstalled {
             path: dir.to_path_buf(),
         });
     }
 
-    // Intact marker-owned install at an older version: safe to update.
+    // Intact marker-owned install at an older version or payload: safe to update.
     write_payload(dir)?;
     Ok(TargetOutcome::Updated {
         path: dir.to_path_buf(),
@@ -666,6 +679,43 @@ mod tests {
             .find(|s| s.path().starts_with(root.join(".claude")))
             .unwrap();
         assert!(matches!(claude, TargetStatus::Installed { .. }));
+    }
+
+    #[test]
+    fn stale_payload_is_outdated_and_reinstall_refreshes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        install_skill_with_home(root, SkillScope::Project, Path::new("/u")).unwrap();
+
+        // Simulate an install made before the embedded payload last changed:
+        // on-disk files match the marker, but the marker hash is not the
+        // current payload hash.
+        let dir = root.join(".agents/skills/herdr-messaging");
+        fs::write(dir.join("SKILL.md"), "older payload").unwrap();
+        let stale_hash = installed_payload_sha256(&dir);
+        assert_ne!(stale_hash, payload_sha256());
+        fs::write(
+            dir.join(MANAGED_MARKER),
+            format!("version = {SKILL_VERSION:?}\nsha256 = {stale_hash:?}\n"),
+        )
+        .unwrap();
+
+        let statuses = skill_status_with_home(root, SkillScope::Project, Path::new("/u")).unwrap();
+        let agents = statuses
+            .iter()
+            .find(|s| s.path().starts_with(root.join(".agents")))
+            .unwrap();
+        assert!(matches!(agents, TargetStatus::Outdated { .. }));
+
+        // Reinstall refreshes the stale target even at the same SKILL_VERSION.
+        let outcome = install_skill_with_home(root, SkillScope::Project, Path::new("/u")).unwrap();
+        let agents = outcome
+            .targets
+            .iter()
+            .find(|t| t.path().starts_with(root.join(".agents")))
+            .unwrap();
+        assert!(matches!(agents, TargetOutcome::Updated { .. }));
+        assert_eq!(fs::read_to_string(dir.join("SKILL.md")).unwrap(), SKILL_MD);
     }
 
     #[test]
