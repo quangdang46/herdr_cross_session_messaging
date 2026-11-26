@@ -221,7 +221,7 @@ pub fn record_for_agent(
     resolved: &ResolvedScope,
 ) -> AgentRecord {
     let existing = registry
-        .get_by_terminal(&agent.terminal_id)
+        .get_by_terminal_any(&agent.terminal_id)
         .ok()
         .flatten()
         .or_else(|| {
@@ -263,7 +263,7 @@ pub fn upsert_self(pool: &PoolContext, identity: &SelfIdentity) -> CmdResult<Age
     let registry = pool.pool.registry();
     let existing = match &identity.agent {
         Some(agent) => registry
-            .get_by_terminal(&agent.terminal_id)
+            .get_by_terminal_any(&agent.terminal_id)
             .ok()
             .flatten()
             .or_else(|| {
@@ -276,7 +276,7 @@ pub fn upsert_self(pool: &PoolContext, identity: &SelfIdentity) -> CmdResult<Age
         None => {
             let pane = &identity.pane;
             registry
-                .get_by_terminal(&pane.terminal_id)
+                .get_by_terminal_any(&pane.terminal_id)
                 .ok()
                 .flatten()
                 .or_else(|| {

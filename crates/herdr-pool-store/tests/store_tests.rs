@@ -562,6 +562,43 @@ fn mark_offline_and_resolve_peer() {
 }
 
 #[test]
+fn get_by_terminal_any_finds_offline_records() {
+    // Identity merge must survive a transient offline mark: an agent that
+    // goes offline and returns on the same terminal keeps its agent_id
+    // (and bootstrap_version), instead of minting a duplicate record.
+    let (_tmp, dir) = state_dir();
+    let store = open_store("scope-tany", &dir);
+    let reg = store.registry();
+
+    let mut rec = agent("scope-tany", "agent");
+    rec.agent_id = "ag_tany".to_string();
+    rec.terminal_id = Some("term-tany".to_string());
+    reg.upsert_agent(&rec).expect("upsert");
+    reg.mark_offline("ag_tany").expect("offline");
+
+    // Live-only lookup misses; inclusive lookup still finds the record.
+    assert!(reg.get_by_terminal("term-tany").expect("live").is_none());
+    let got = reg
+        .get_by_terminal_any("term-tany")
+        .expect("any")
+        .expect("some");
+    assert_eq!(got.agent_id, "ag_tany");
+
+    // A newer live row on the same terminal wins over the offline one.
+    let mut live = rec.clone();
+    live.agent_id = "ag_tany2".to_string();
+    live.status = "idle".to_string();
+    live.offline_at = None;
+    live.last_seen_at += 1;
+    reg.upsert_agent(&live).expect("upsert live");
+    let got = reg
+        .get_by_terminal_any("term-tany")
+        .expect("any")
+        .expect("some");
+    assert_eq!(got.agent_id, "ag_tany2");
+}
+
+#[test]
 fn cross_scope_isolation_by_construction() {
     let (_tmp, dir) = state_dir();
     let store_a = open_store("scope-x", &dir);

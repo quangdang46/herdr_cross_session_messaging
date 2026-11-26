@@ -100,6 +100,14 @@ All notable changes to this project are documented here. The format follows
 - `reply` marks the original `msg_*` message acknowledged (best-effort).
 - Agents whose resolved scope changes (terminal reused in another project)
   no longer leave a live ghost record in the old scope's registry.
+- Agent identity churn on transient offline marks: identity merge looked up
+  existing records with a live-only `terminal_id` query, so an agent marked
+  offline by a sighting gap (agent restart, `pane.exited` during a
+  `devin --resume` handoff) and then seen again minted a *new* `agent_id` —
+  resetting `bootstrap_version` (duplicate bootstrap prompts) and orphaning
+  threads/messages addressed to the old id. The merge now uses
+  `get_by_terminal_any`, which prefers live rows but falls back to the most
+  recent offline record for the same terminal.
 - `inbox --follow` survives transient store errors instead of exiting.
 - `herdr-pool install` now refreshes marker-owned skill installs whose
   payload content changed without a `SKILL_VERSION` bump (previously

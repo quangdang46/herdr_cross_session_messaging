@@ -217,6 +217,33 @@ impl<'a> RegistryStore<'a> {
         Ok(row)
     }
 
+    /// Most recent agent record for a terminal id, **including offline**.
+    ///
+    /// Identity merge must use this, not [`Self::get_by_terminal`]: an
+    /// agent marked offline by a transient sighting gap (agent process
+    /// restart, `pane.exited` during a `--resume` handoff) still owns the
+    /// terminal. Missing the offline row mints a fresh `agent_id`, which
+    /// resets `bootstrap_version` (duplicate bootstrap prompts) and
+    /// orphans threads/messages addressed to the old id. Live rows win
+    /// over offline ones; ties break on `last_seen_at`.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
+    pub fn get_by_terminal_any(&self, terminal_id: &str) -> Result<Option<AgentRecord>> {
+        let conn = self.pool.conn();
+        let row = conn
+            .query_row(
+                &format!(
+                    "SELECT {AGENT_COLUMNS} FROM agents \
+                     WHERE terminal_id = ?1 \
+                     ORDER BY (status != '{STATUS_OFFLINE}') DESC, last_seen_at DESC \
+                     LIMIT 1"
+                ),
+                params![terminal_id],
+                agent_from_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
     /// Agents matching an agent name (names are unique among *live* agents but
     /// may repeat historically).
     #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]

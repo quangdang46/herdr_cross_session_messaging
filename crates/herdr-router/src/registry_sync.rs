@@ -644,13 +644,17 @@ impl<'a> RegistrySync<'a> {
         resolved: &ResolvedScope,
     ) -> Result<AgentRecord> {
         let registry = pool.registry();
-        let existing = registry.get_by_terminal(&agent.terminal_id)?.or_else(|| {
-            registry
-                .find_by_pane(&agent.pane_id)
-                .ok()?
-                .into_iter()
-                .find(|r| r.status != STATUS_OFFLINE)
-        });
+        // Terminal match includes offline rows: a transient offline mark
+        // (agent restart, resume handoff) must not mint a new agent_id.
+        let existing = registry
+            .get_by_terminal_any(&agent.terminal_id)?
+            .or_else(|| {
+                registry
+                    .find_by_pane(&agent.pane_id)
+                    .ok()?
+                    .into_iter()
+                    .find(|r| r.status != STATUS_OFFLINE)
+            });
 
         let now = now_millis();
         Ok(AgentRecord {
