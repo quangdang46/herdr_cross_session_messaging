@@ -148,6 +148,13 @@ All notable changes to this project are documented here. The format follows
   delivery to a not-ready recipient likewise defers without consuming an
   attempt instead of prompting into a half-restored TUI, and rescue helper
   selection skips not-ready agents.
+- Pool migrations raced on first open: `PRAGMA user_version` was read before
+  the transaction began, so a CLI and the daemon opening a brand-new
+  `pool.db` concurrently both saw v1 and both applied V2 — the loser failed
+  with "table already exists". Migrations now run inside a `BEGIN
+  IMMEDIATE` transaction (version read inside the tx) and retry on
+  `SQLITE_BUSY`/`SQLITE_LOCKED` within the busy budget, so concurrent
+  first-opens serialize cleanly.
 
 ### Changed
 

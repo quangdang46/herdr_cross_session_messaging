@@ -84,6 +84,26 @@ fn migrations_apply_once_and_reopen_is_idempotent() {
 }
 
 #[test]
+fn concurrent_first_open_migrates_safely() {
+    // The CLI and the daemon can open the same brand-new pool.db at once
+    // (e.g. first `send` racing daemon startup). Migrations must serialize:
+    // the loser waits for the winner's commit and then no-ops, rather than
+    // failing on "table already exists".
+    let (_tmp, dir) = state_dir();
+    let scope = "scope-race";
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let dir = dir.clone();
+        handles.push(std::thread::spawn(move || {
+            PoolStore::open(scope, dir).expect("open pool store")
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("join");
+    }
+}
+
+#[test]
 fn pool_db_lives_under_pools_scope_key() {
     let (_tmp, dir) = state_dir();
     let store = open_store("abc123", &dir);

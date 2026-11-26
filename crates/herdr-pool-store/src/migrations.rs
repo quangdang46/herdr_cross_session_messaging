@@ -48,8 +48,40 @@ const MIGRATIONS: &[Migration] = &[
 
 /// Apply all pending migrations to `conn`. Idempotent.
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
-    let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let tx = conn.transaction()?;
+    // BEGIN IMMEDIATE makes the loser of a concurrent first-open wait for
+    // the winner's commit, but SQLite can still report BUSY/LOCKED before
+    // the busy handler engages — retry the whole migration inside the busy
+    // budget rather than failing the open.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match migrate_once(conn) {
+            Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(err, _)))
+                if matches!(
+                    err.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) =>
+            {
+                if std::time::Instant::now() >= deadline {
+                    return Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                        err, None,
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn migrate_once(conn: &mut Connection) -> Result<()> {
+    // BEGIN IMMEDIATE + read user_version inside the tx: the CLI and the
+    // daemon can open the same brand-new pool.db concurrently. A deferred
+    // transaction would read a stale user_version, then fail mid-batch on
+    // objects the winning migrator already created ("table already
+    // exists"). With IMMEDIATE the second opener waits (busy_timeout) for
+    // the winner's commit, then sees the bumped version and no-ops.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     for migration in MIGRATIONS.iter().filter(|m| m.version > current) {
         tx.execute_batch(migration.sql).map_err(|e| {
             StoreError::Migration(format!("V{} apply failed: {e}", migration.version))
