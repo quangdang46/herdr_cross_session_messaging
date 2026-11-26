@@ -140,7 +140,10 @@ All notable changes to this project are documented here. The format follows
   events carry no readiness fields, so a promptable transition for a
   not-yet-ready agent triggers a fresh `agent.get`; readiness flips are also
   picked up by the periodic `agent.list` reconcile. Older Herdr servers that
-  omit `interactive_ready` are treated as ready (previous behavior).
+  omit `interactive_ready` are treated as ready (previous behavior). Message
+  delivery to a not-ready recipient likewise defers without consuming an
+  attempt instead of prompting into a half-restored TUI, and rescue helper
+  selection skips not-ready agents.
 
 ### Changed
 

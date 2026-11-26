@@ -48,6 +48,10 @@ pub const BACKOFF_CAP: Duration = Duration::from_secs(300);
 /// Delay applied after `agent_blocked` — shorter than the generic backoff
 /// because the agent is alive and will unblock on its own.
 pub const BLOCKED_BACKOFF: Duration = Duration::from_secs(15);
+/// Delay applied while the recipient's TUI is not interactive-ready
+/// (launching or mid `--resume`). Like `agent_blocked`, this is not a
+/// delivery failure — the message waits without consuming an attempt.
+pub const NOT_READY_BACKOFF: Duration = Duration::from_secs(15);
 /// How long a recipient may stay offline before pending mail is
 /// dead-lettered instead of retried forever.
 pub const OFFLINE_DEAD_AFTER: Duration = Duration::from_secs(5 * 60);
@@ -216,6 +220,14 @@ impl DeliveryWorker {
 
         if recipient.status == STATUS_OFFLINE {
             return self.handle_offline_recipient(messages, msg, &recipient);
+        }
+
+        // The TUI is still launching or restoring a session — prompting
+        // now could paste the envelope into a half-restored UI. Defer
+        // without consuming an attempt; the registry refreshes readiness
+        // on the next AgentInfo sighting.
+        if !recipient.interactive_ready || recipient.launch_pending {
+            return self.defer_retry(messages, msg, NOT_READY_BACKOFF);
         }
 
         // Resolve the CURRENT target on every attempt. `agent.prompt`

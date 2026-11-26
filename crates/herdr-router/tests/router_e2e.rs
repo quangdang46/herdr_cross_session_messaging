@@ -410,6 +410,68 @@ fn delivery_worker_blocked_backoff_is_recorded() {
 }
 
 #[test]
+fn delivery_worker_defers_not_ready_recipient_without_prompting() {
+    // A recipient whose TUI is still launching/resuming
+    // (`interactive_ready=false` / `launch_pending=true`) must not receive
+    // `agent.prompt` — the envelope would be pasted into a half-restored
+    // session. The message defers without consuming an attempt.
+    let server = FakeHerdr::start().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+
+    let pools = Arc::new(Pools::open(state.path()).unwrap());
+    let pool = pools
+        .for_scope_key("0123456789abcdef0123456789abcdef", project.path())
+        .unwrap();
+    pool.registry()
+        .upsert_agent(&herdr_pool_store::AgentRecord {
+            agent_id: "ag_target".into(),
+            scope_key: "0123456789abcdef0123456789abcdef".into(),
+            terminal_id: Some("term_target".into()),
+            pane_id: Some("w9:p9".into()),
+            agent_kind: Some("claude".into()),
+            name: None,
+            cwd: None,
+            status: "idle".into(),
+            interactive_ready: false,
+            launch_pending: true,
+            bootstrap_version: None,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            offline_at: None,
+        })
+        .unwrap();
+    let msg = pool
+        .messages()
+        .send("ag_sender", "ag_target", "resume in progress")
+        .unwrap();
+
+    // No agent.prompt responder is registered — any prompt attempt would
+    // surface as a request (and likely an error), which we assert absent.
+    let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
+    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = DeliveryWorker::new(
+        client,
+        pools,
+        shutdown,
+        Notify::default(),
+        Duration::from_millis(10),
+    );
+    assert_eq!(worker.drain_once().unwrap(), 1);
+
+    let after = pool.messages().message(&msg.id).unwrap().unwrap();
+    assert_eq!(after.status, herdr_pool_store::MessageStatus::Pending);
+    assert_eq!(after.attempt_count, 0);
+    assert!(after.next_retry_at.is_some());
+    assert!(
+        server.requests_for("agent.prompt").is_empty(),
+        "agent.prompt must not be called for a not-ready recipient"
+    );
+    // Deferred ~15s — an immediate second drain skips it.
+    assert_eq!(worker.drain_once().unwrap(), 0);
+}
+
+#[test]
 fn delivery_worker_blocked_creates_rescue_job_and_dispatches_helper() {
     // agent_blocked on delivery → durable rescue job → rescue sweep picks
     // an eligible peer and sends a [HERDR RESCUE REQUEST] prompt.
