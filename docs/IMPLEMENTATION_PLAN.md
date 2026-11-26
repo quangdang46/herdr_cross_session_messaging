@@ -306,10 +306,15 @@ decide at scaffold — prefer 2021 for max compat).
 - **M4 Daemon**: routerd event loop, delivery worker, ensure_daemon, startup hook.
 - **M5 Skill + manifest**: SKILL.md, installer, herdr-plugin.toml, bootstrap prompt.
 - **M6 E2E + polish**: fake-socket e2e suite, docs, README, release workflow.
-- **Phase 2 (shipped)**: rescue engine — `agent_blocked` defers without
-  consuming attempts; throttled pane snapshot + `notification.show` toast;
-  peer-assist escalation after 5min blocked prompts another live agent in
-  scope with the snapshot.
+- **Phase 2 (shipped)**: peer TUI rescue — `agent_blocked` defers without
+  consuming attempts and ensures a durable `rescue_jobs` row (SQLite);
+  `RescueManager` snapshots the source pane's visible TUI, reserves an
+  eligible same-scope helper (idle > done > working; blocked/offline/
+  reserved excluded — no A↔B loops), and dispatches a
+  `[HERDR RESCUE REQUEST]` prompt. The helper drives the source pane via
+  Herdr and reports `herdr-pool rescue <id> done|needs-human`; the monitor
+  resolves jobs whose source unblocked, with timeouts/attempt caps and
+  crash recovery (`assigned`-stale → pending) escalating to `needs_human`.
 - **Phase 3 (shipped)**: popup inbox UI (`[[panes]] inbox` +
   `herdr-pool inbox --follow` with `q`/`u` keys, identity via
   `HERDR_PLUGIN_CONTEXT_JSON`), `herdr-pool broadcast`, opt-in delivery
