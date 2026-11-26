@@ -36,6 +36,7 @@
 
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
 use herdr_protocol::{AgentInfo, PaneInfo, PaneProcessInfo};
 use sha2::{Digest, Sha256};
@@ -175,8 +176,42 @@ pub fn scope_key(canonical_path: impl AsRef<Path>) -> ScopeKey {
     ScopeKey(hex)
 }
 
-/// Resolve the scope from explicit cwd candidates plus a process-info
-/// fallback.
+/// How a candidate cwd maps to the scope root.
+///
+/// * [`ScopeMode::LaunchCwd`] — the pane's launch directory itself (default;
+///   the historical MVP rule).
+/// * [`ScopeMode::GitRoot`] — the nearest ancestor directory containing a
+///   `.git` entry (directory *or* file, so worktrees and submodules count),
+///   falling back to the launch directory when no marker exists. This lets
+///   agents launched in different subdirectories of one repository share a
+///   pool while unrelated folders stay isolated.
+///
+/// Selected once per process via `HERDR_POOL_SCOPE_MODE` (`cwd` | `git`;
+/// anything else falls back to the default). The default is `cwd` because
+/// git-root promotion has a footgun: if `$HOME` itself sits inside a git
+/// repo (e.g. a dotfiles repo), every non-repo folder under home would
+/// collapse into a single scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeMode {
+    /// Scope = canonical launch cwd.
+    LaunchCwd,
+    /// Scope = nearest `.git` ancestor of the launch cwd (or cwd itself).
+    GitRoot,
+}
+
+/// Env var selecting [`ScopeMode`].
+pub const SCOPE_MODE_ENV: &str = "HERDR_POOL_SCOPE_MODE";
+
+/// The process-wide scope mode, resolved lazily from the environment.
+pub fn scope_mode() -> ScopeMode {
+    static MODE: OnceLock<ScopeMode> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var(SCOPE_MODE_ENV) {
+        Ok(v) if v.eq_ignore_ascii_case("git") => ScopeMode::GitRoot,
+        _ => ScopeMode::LaunchCwd,
+    })
+}
+
+/// Resolve the scope using the process-wide [`scope_mode`].
 ///
 /// Candidate order (first non-empty wins):
 /// 1. `cwd` — pane launch cwd (authoritative, see module docs).
@@ -191,6 +226,17 @@ pub fn resolve_scope(
     foreground_cwd: Option<&str>,
     process_info: Option<&PaneProcessInfo>,
 ) -> Result<ResolvedScope> {
+    resolve_scope_with_mode(cwd, foreground_cwd, process_info, scope_mode())
+}
+
+/// Resolve the scope for an explicit [`ScopeMode`] (testable variant of
+/// [`resolve_scope`]).
+pub fn resolve_scope_with_mode(
+    cwd: Option<&str>,
+    foreground_cwd: Option<&str>,
+    process_info: Option<&PaneProcessInfo>,
+    mode: ScopeMode,
+) -> Result<ResolvedScope> {
     let candidates = [cwd, foreground_cwd]
         .into_iter()
         .flatten()
@@ -201,7 +247,12 @@ pub fn resolve_scope(
         if trimmed.is_empty() {
             continue;
         }
-        let canonical_path = canonicalize_path(trimmed);
+        let mut canonical_path = canonicalize_path(trimmed);
+        if mode == ScopeMode::GitRoot {
+            if let Some(root) = git_toplevel(&canonical_path) {
+                canonical_path = root;
+            }
+        }
         let key = scope_key(&canonical_path);
         return Ok(ResolvedScope {
             canonical_path,
@@ -212,6 +263,15 @@ pub fn resolve_scope(
     Err(CoreError::ScopeUnresolved(
         "no cwd on agent/pane record or process info".to_string(),
     ))
+}
+
+/// Nearest ancestor of `dir` (including `dir` itself) containing a `.git`
+/// entry — a directory for normal repos, a file for worktrees/submodules.
+/// Returns `None` outside any git work tree.
+fn git_toplevel(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())
+        .map(Path::to_path_buf)
 }
 
 /// Foreground-process cwds from a [`PaneProcessInfo`], in reported order.
@@ -602,5 +662,127 @@ mod tests {
         let k1 = scope_key(canonicalize_path(&dir));
         let k2 = scope_key(canonicalize_path(dir.as_os_str()));
         assert_eq!(k1, k2);
+    }
+
+    // ----- ScopeMode::GitRoot ----------------------------------------------
+
+    #[test]
+    fn git_root_mode_unifies_subdirs_of_one_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let backend = repo.join("backend");
+        let frontend = repo.join("frontend");
+        std::fs::create_dir_all(&backend).unwrap();
+        std::fs::create_dir_all(&frontend).unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+
+        let root_scope = resolve_scope_with_mode(
+            Some(&repo.to_string_lossy()),
+            None,
+            None,
+            ScopeMode::GitRoot,
+        )
+        .unwrap();
+        let back_scope = resolve_scope_with_mode(
+            Some(&backend.to_string_lossy()),
+            None,
+            None,
+            ScopeMode::GitRoot,
+        )
+        .unwrap();
+        let front_scope = resolve_scope_with_mode(
+            Some(&frontend.to_string_lossy()),
+            None,
+            None,
+            ScopeMode::GitRoot,
+        )
+        .unwrap();
+
+        assert_eq!(root_scope.scope_key, back_scope.scope_key);
+        assert_eq!(root_scope.scope_key, front_scope.scope_key);
+        assert_eq!(
+            back_scope.canonical_path,
+            std::fs::canonicalize(&repo).unwrap()
+        );
+    }
+
+    #[test]
+    fn git_root_mode_keeps_unrelated_dirs_separate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = tmp.path().join("a");
+        let repo_b = tmp.path().join("b");
+        std::fs::create_dir_all(repo_a.join(".git")).unwrap();
+        std::fs::create_dir_all(repo_b.join(".git")).unwrap();
+
+        let a = resolve_scope_with_mode(
+            Some(&repo_a.to_string_lossy()),
+            None,
+            None,
+            ScopeMode::GitRoot,
+        )
+        .unwrap();
+        let b = resolve_scope_with_mode(
+            Some(&repo_b.to_string_lossy()),
+            None,
+            None,
+            ScopeMode::GitRoot,
+        )
+        .unwrap();
+        assert_ne!(a.scope_key, b.scope_key);
+    }
+
+    #[test]
+    fn git_root_mode_falls_back_to_cwd_outside_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plain");
+        std::fs::create_dir(&dir).unwrap();
+        let scope =
+            resolve_scope_with_mode(Some(&dir.to_string_lossy()), None, None, ScopeMode::GitRoot)
+                .unwrap();
+        assert_eq!(scope.canonical_path, std::fs::canonicalize(&dir).unwrap());
+    }
+
+    #[test]
+    fn git_root_mode_accepts_git_file_marker() {
+        // Worktrees/submodules carry `.git` as a *file*, not a directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("wt");
+        let sub = wt.join("pkg");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(wt.join(".git"), "gitdir: /elsewhere\n").unwrap();
+
+        let scope =
+            resolve_scope_with_mode(Some(&sub.to_string_lossy()), None, None, ScopeMode::GitRoot)
+                .unwrap();
+        assert_eq!(scope.canonical_path, std::fs::canonicalize(&wt).unwrap());
+    }
+
+    #[test]
+    fn launch_cwd_mode_ignores_git_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let sub = repo.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+
+        let repo_scope = resolve_scope_with_mode(
+            Some(&repo.to_string_lossy()),
+            None,
+            None,
+            ScopeMode::LaunchCwd,
+        )
+        .unwrap();
+        let sub_scope = resolve_scope_with_mode(
+            Some(&sub.to_string_lossy()),
+            None,
+            None,
+            ScopeMode::LaunchCwd,
+        )
+        .unwrap();
+        assert_ne!(repo_scope.scope_key, sub_scope.scope_key);
+        assert_eq!(
+            sub_scope.canonical_path,
+            std::fs::canonicalize(&sub).unwrap()
+        );
     }
 }

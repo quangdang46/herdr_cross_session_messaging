@@ -1,6 +1,7 @@
 //! Core domain logic: project scope resolution and peer registry.
 //!
-//! Scope = canonical launch cwd of a pane, hashed to a scope key. All
+//! Scope = canonical launch cwd of a pane (or its git toplevel when
+//! `HERDR_POOL_SCOPE_MODE=git`), hashed to a scope key. All
 //! messaging data lives in per-scope SQLite pools so agents in different
 //! project folders can never see or message each other.
 //!
@@ -25,6 +26,7 @@ pub use identity::{
 };
 pub use pool::{open_pool, PoolContext};
 pub use scope::{
-    canonicalize_path, resolve_scope, resolve_scope_for_agent, resolve_scope_for_pane, scope_key,
-    ResolvedScope, ScopeKey,
+    canonicalize_path, resolve_scope, resolve_scope_for_agent, resolve_scope_for_pane,
+    resolve_scope_with_mode, scope_key, scope_mode, ResolvedScope, ScopeKey, ScopeMode,
+    SCOPE_MODE_ENV,
 };
