@@ -75,6 +75,14 @@ pub struct RescueManager {
     /// daemon restart simply forgets the exclusions — the attempt cap
     /// still bounds retries.
     failed_helpers: Mutex<HashMap<String, HashSet<String>>>,
+    /// agent_id → last sweep time the agent was seen NOT `blocked`
+    /// (offline counts). This is the "new blocked episode" signal that
+    /// lifts the needs_human mute in [`Self::ensure_job`]: an agent that
+    /// escalated and stayed blocked must not churn a fresh rescue job
+    /// every sweep, but one that recovered and blocked again deserves a
+    /// new attempt. In-memory only — a restart simply forgets the mute,
+    /// costing at most one extra job cycle per stuck agent.
+    seen_unblocked_at: Mutex<HashMap<String, i64>>,
 }
 
 impl RescueManager {
@@ -85,6 +93,7 @@ impl RescueManager {
             job_timeout: RESCUE_JOB_TIMEOUT,
             max_attempts: RESCUE_MAX_ATTEMPTS,
             failed_helpers: Mutex::new(HashMap::new()),
+            seen_unblocked_at: Mutex::new(HashMap::new()),
         }
     }
 
@@ -108,6 +117,25 @@ impl RescueManager {
         let rescues = pool.rescues();
         if rescues.open_for_source(&source.agent_id)?.is_some() {
             return Ok(());
+        }
+        // Same-episode mute: the latest job for this source ended
+        // `needs_human` and the agent has not been observed un-blocked
+        // since — starting another job now would just re-escalate (and
+        // re-toast) every sweep. A `resolved`/`failed` latest job, or an
+        // unblocked sighting after the escalation, means a new episode.
+        if let Some(latest) = rescues.latest_for_source(&source.agent_id)? {
+            if latest.status == RescueStatus::NeedsHuman {
+                let muted_at = latest.resolved_at.unwrap_or(latest.updated_at);
+                let seen_unblocked = self
+                    .seen_unblocked_at
+                    .lock()
+                    .ok()
+                    .and_then(|m| m.get(&source.agent_id).copied())
+                    .unwrap_or(0);
+                if seen_unblocked <= muted_at {
+                    return Ok(());
+                }
+            }
         }
         // `agent.prompt` just reported `agent_blocked`, but the registry
         // status may still be stale (`idle`/`working`) until the next
@@ -158,13 +186,31 @@ impl RescueManager {
     }
 
     fn sweep_pool(&self, pool: &Arc<PoolStore>) -> Result<()> {
-        let agents = match pool.registry().list_agents(false) {
-            Ok(agents) => agents,
+        // Include offline records: an offline agent counts as "seen
+        // unblocked" so a returning agent starts a fresh episode.
+        let all = match pool.registry().list_agents(true) {
+            Ok(all) => all,
             Err(err) => {
                 tracing::warn!(error = %err, "rescue: registry list failed");
                 return Ok(());
             }
         };
+        let agents: Vec<AgentRecord> = all
+            .iter()
+            .filter(|a| a.status != STATUS_OFFLINE)
+            .cloned()
+            .collect();
+
+        // Record unblocked sightings (the mute-lift signal for ensure_job).
+        // Prune to live registry ids so the map can't grow unboundedly.
+        let now = now_millis();
+        if let Ok(mut seen) = self.seen_unblocked_at.lock() {
+            let live: HashSet<&str> = all.iter().map(|a| a.agent_id.as_str()).collect();
+            seen.retain(|id, _| live.contains(id.as_str()));
+            for agent in all.iter().filter(|a| a.status != "blocked") {
+                seen.insert(agent.agent_id.clone(), now);
+            }
+        }
 
         // 1. Detect: registry says blocked → ensure a job exists.
         for agent in agents.iter().filter(|a| a.status == "blocked") {

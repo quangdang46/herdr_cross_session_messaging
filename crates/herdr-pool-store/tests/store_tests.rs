@@ -738,6 +738,40 @@ fn rescue_survives_reopen() {
 }
 
 #[test]
+fn rescue_latest_for_source_returns_newest_regardless_of_status() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("rescue_latest", &dir);
+    let rescues = store.rescues();
+    assert!(rescues
+        .latest_for_source("ag_src")
+        .expect("latest")
+        .is_none());
+
+    rescues
+        .create_pending("ag_src", Some("w:p1"), None, None)
+        .expect("create");
+    let first = rescues
+        .latest_for_source("ag_src")
+        .expect("latest")
+        .unwrap();
+    assert_eq!(first.status, RescueStatus::Pending);
+
+    // A terminal job becomes the latest — open_for_source goes empty but
+    // latest_for_source still reports it (the needs_human mute signal).
+    rescues
+        .set_status(&first.rescue_id, RescueStatus::NeedsHuman)
+        .expect("needs_human");
+    assert!(rescues.open_for_source("ag_src").expect("open").is_none());
+    let latest = rescues
+        .latest_for_source("ag_src")
+        .expect("latest")
+        .unwrap();
+    assert_eq!(latest.rescue_id, first.rescue_id);
+    assert_eq!(latest.status, RescueStatus::NeedsHuman);
+    assert!(latest.resolved_at.is_some());
+}
+
+#[test]
 fn rescue_update_source_refreshes_pane_and_snapshot() {
     let (_tmp, dir) = state_dir();
     let store = open_store("rescue_update", &dir);

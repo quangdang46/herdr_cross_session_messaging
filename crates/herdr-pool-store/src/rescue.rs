@@ -255,6 +255,25 @@ impl<'a> RescueStore<'a> {
         Ok(rows)
     }
 
+    /// The most recent job for a source agent, any status — used to tell
+    /// "same blocked episode already escalated" apart from a fresh block.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
+    pub fn latest_for_source(&self, source_agent_id: &str) -> Result<Option<RescueJob>> {
+        let conn = self.pool.conn();
+        let row = conn
+            .query_row(
+                &format!(
+                    "SELECT {RESCUE_COLUMNS} FROM rescue_jobs \
+                     WHERE source_agent_id = ?1 \
+                     ORDER BY created_at DESC, rescue_id DESC LIMIT 1"
+                ),
+                params![source_agent_id],
+                rescue_from_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
     /// Fetch one job by id.
     #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
     pub fn get(&self, rescue_id: &str) -> Result<Option<RescueJob>> {
