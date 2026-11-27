@@ -9,7 +9,7 @@
 //! Every pool message is delivered as one `agent.prompt` whose text is:
 //!
 //! ```text
-//! [herdr-pool] msg <id> from <kind> (<agent_id>) thread <tid>:
+//! [herdr-pool] msg <id> from <kind> (<pane_id>) thread <tid>:
 //! <content>
 //! Reply: herdr-pool reply <id> "..."
 //! ```
@@ -17,7 +17,9 @@
 //! - `<id>` — `msg_<uuidv7>` message id.
 //! - `<kind>` — sender agent kind (`claude`, `codex`, ...) or display name;
 //!   `unknown` when the sender is not (or no longer) registered.
-//! - `<agent_id>` — sender's stable `ag_...` pool id.
+//! - `<pane_id>` — sender's current Herdr pane id (`w1:p2`), the handle
+//!   peers see in the Herdr UI; falls back to the `ag_*` pool id, then the
+//!   agent name, when no pane id is known.
 //! - `<tid>` — `th_<uuidv7>` thread id, or `-` for legacy rows without one.
 //!
 //! ## Bootstrap prompt
@@ -46,11 +48,30 @@ fn sender_label(record: Option<&AgentRecord>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Peer-facing handle for an agent record: the pane id first (what agents
+/// see in the Herdr UI and can paste into `herdr-pool send`), then the
+/// agent name, then the stable `ag_*` pool id as a last resort.
+fn agent_handle(record: &AgentRecord) -> String {
+    record
+        .pane_id
+        .clone()
+        .filter(|p| !p.is_empty())
+        .or_else(|| record.name.clone().filter(|n| !n.is_empty()))
+        .unwrap_or_else(|| record.agent_id.clone())
+}
+
+/// The `(<handle>)` shown after the sender kind in message envelopes.
+fn sender_handle(msg: &Message, sender: Option<&AgentRecord>) -> String {
+    sender
+        .map(agent_handle)
+        .unwrap_or_else(|| msg.from_agent.clone())
+}
+
 /// Format the delivery envelope for `msg`.
 ///
-/// `sender` is the sender's registry record (used for the `<kind>` label);
-/// pass `None` when the sender is unknown — the envelope still carries the
-/// raw `from_agent` id.
+/// `sender` is the sender's registry record (used for the `<kind>` label
+/// and pane-id handle); pass `None` when the sender is unknown — the
+/// envelope then falls back to the raw `from_agent` pool id.
 pub fn message_envelope(msg: &Message, sender: Option<&AgentRecord>) -> String {
     let thread = msg.thread_id.as_deref().unwrap_or("-");
     format!(
@@ -58,8 +79,29 @@ pub fn message_envelope(msg: &Message, sender: Option<&AgentRecord>) -> String {
          Reply: herdr-pool reply {} \"...\"",
         msg.id,
         sender_label(sender),
-        msg.from_agent,
+        sender_handle(msg, sender),
         msg.content,
+        msg.id
+    )
+}
+
+/// Stale-thread reminder prompt sent by the router's nudge sweep.
+///
+/// Deliberately gentle: it points at the unanswered message and suggests
+/// proactively continuing the conversation — it does NOT presume the
+/// recipient owes the sender more work.
+pub fn nudge_envelope(msg: &Message, sender: Option<&AgentRecord>) -> String {
+    let thread = msg.thread_id.as_deref().unwrap_or("-");
+    format!(
+        "{ENVELOPE_PREFIX} reminder: a message in this thread has gone unanswered.\n\
+         From: {} ({}) · msg {} · thread {thread}\n\
+         It was delivered a while ago and no reply has been seen since. If the\n\
+         exchange is still relevant, consider proactively messaging them back —\n\
+         \x20 herdr-pool reply {} \"...\" or herdr-pool send <peer> \"...\".\n\
+         If you are done, no action is needed.",
+        sender_label(sender),
+        sender_handle(msg, sender),
+        msg.id,
         msg.id
     )
 }
@@ -212,6 +254,40 @@ mod tests {
         let text = message_envelope(&m, None);
         assert!(text.contains("thread -:"));
         assert!(text.contains("from unknown (ag_sender)"));
+    }
+
+    #[test]
+    fn envelope_prefers_pane_id_handle() {
+        let mut sender = AgentRecord {
+            agent_id: "ag_sender".into(),
+            scope_key: "s".into(),
+            terminal_id: None,
+            pane_id: Some("w1:p7".into()),
+            agent_kind: Some("claude".into()),
+            name: Some("builder".into()),
+            cwd: None,
+            status: "idle".into(),
+            interactive_ready: true,
+            launch_pending: false,
+            bootstrap_version: None,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            offline_at: None,
+        };
+        let text = message_envelope(&msg(), Some(&sender));
+        assert!(text.contains("from claude (w1:p7)"), "{text}");
+        // Falls back to the agent name when the pane id is gone.
+        sender.pane_id = None;
+        let text = message_envelope(&msg(), Some(&sender));
+        assert!(text.contains("from claude (builder)"), "{text}");
+    }
+
+    #[test]
+    fn nudge_envelope_is_gentle_and_actionable() {
+        let text = nudge_envelope(&msg(), None);
+        assert!(text.starts_with("[herdr-pool] reminder:"));
+        assert!(text.contains("no action is needed"));
+        assert!(text.contains("herdr-pool reply msg_abc"));
     }
 
     #[test]

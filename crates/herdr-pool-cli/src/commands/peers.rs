@@ -50,6 +50,7 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<()> {
         .iter()
         .map(|p| {
             vec![
+                p.pane_id.clone().unwrap_or_else(|| "-".into()),
                 p.agent_id.clone(),
                 p.agent_kind.clone().unwrap_or_else(|| "-".into()),
                 p.name.clone().unwrap_or_else(|| "-".into()),
@@ -58,6 +59,9 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<()> {
             ]
         })
         .collect();
-    print_table(&["AGENT_ID", "KIND", "NAME", "STATUS", "CWD"], &rows);
+    print_table(
+        &["PANE", "AGENT_ID", "KIND", "NAME", "STATUS", "CWD"],
+        &rows,
+    );
     Ok(())
 }

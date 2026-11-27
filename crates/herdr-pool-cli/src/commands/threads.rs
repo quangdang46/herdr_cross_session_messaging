@@ -29,6 +29,7 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<()> {
         let mut unread = 0i64;
         let mut peer_agent: Option<String> = None;
         let mut peer_name: Option<String> = None;
+        let mut peer_pane: Option<String> = None;
         let mut peer_kind: Option<String> = None;
 
         for m in &msgs {
@@ -51,6 +52,7 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<()> {
                 if let Ok(Some(rec)) = registry.get_agent(other_id) {
                     peer_agent = Some(rec.agent_id.clone());
                     peer_name = rec.name.clone();
+                    peer_pane = rec.pane_id.clone();
                     peer_kind = rec.agent_kind.clone();
                 } else {
                     peer_agent = Some(other_id.to_string());
@@ -65,6 +67,7 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<()> {
             last_message: last.map(|m| snippet(&m.content, 60)),
             peer_agent_id: peer_agent,
             peer_name,
+            peer_pane_id: peer_pane,
             peer_agent_kind: peer_kind,
             unread_count: unread,
             message_count: msgs.len() as i64,
@@ -86,10 +89,7 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<()> {
         .map(|t| {
             vec![
                 t.thread_id.clone(),
-                t.peer_name
-                    .clone()
-                    .or(t.peer_agent_id.clone())
-                    .unwrap_or_else(|| "-".into()),
+                peer_label(t),
                 t.unread_count.to_string(),
                 t.message_count.to_string(),
                 fmt_time(t.last_activity_at),
@@ -112,4 +112,15 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<()> {
         &rows,
     );
     Ok(())
+}
+
+/// Human peer label: `name (pane_id)` when both are known — the pane id is
+/// the handle agents recognize from the Herdr UI.
+fn peer_label(t: &ThreadSummaryJson) -> String {
+    match (&t.peer_name, &t.peer_pane_id) {
+        (Some(name), Some(pane)) => format!("{name} ({pane})"),
+        (Some(name), None) => name.clone(),
+        (None, Some(pane)) => pane.clone(),
+        (None, None) => t.peer_agent_id.clone().unwrap_or_else(|| "-".into()),
+    }
 }

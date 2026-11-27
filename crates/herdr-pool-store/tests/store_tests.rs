@@ -399,6 +399,48 @@ fn outbox_due_respects_next_retry_at() {
     assert!(positions[0] < positions[1], "created_at ordering");
 }
 
+#[test]
+fn unanswered_delivered_lists_stale_unreplied_mail() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("scope-nudge", &dir);
+    let msgs = store.messages();
+
+    // ag_a -> ag_b, delivered, never answered: a nudge candidate.
+    let stale = msgs.send("ag_a", "ag_b", "please review").expect("send");
+    msgs.mark_delivered(&stale.id).expect("delivered");
+
+    // ag_b -> ag_c, delivered, but ag_c already replied in-thread: answered.
+    let answered = msgs.send("ag_b", "ag_c", "task for c").expect("send");
+    msgs.mark_delivered(&answered.id).expect("delivered");
+    let _reply = msgs
+        .send_in_thread(
+            answered.thread_id.as_deref().unwrap(),
+            "ag_c",
+            "ag_b",
+            "reply",
+            "done",
+        )
+        .expect("reply");
+
+    // Still pending (never delivered): not a candidate — the outbox owns it.
+    let _pending = msgs.send("ag_a", "ag_b", "queued").expect("send");
+
+    // A cutoff in the past excludes everything (messages are "too new").
+    assert!(msgs.unanswered_delivered(0).expect("unanswered").is_empty());
+
+    let candidates = msgs.unanswered_delivered(i64::MAX).expect("unanswered");
+    let ids: Vec<&str> = candidates.iter().map(|m| m.id.as_str()).collect();
+    assert!(
+        ids.contains(&stale.id.as_str()),
+        "stale mail is a candidate"
+    );
+    assert!(
+        !ids.contains(&answered.id.as_str()),
+        "answered mail excluded"
+    );
+    assert_eq!(candidates.len(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // RegistryStore
 // ---------------------------------------------------------------------------

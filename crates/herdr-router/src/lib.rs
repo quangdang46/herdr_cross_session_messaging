@@ -19,6 +19,7 @@
 //! - [`registry_sync`]: [`RegistrySync`] (snapshot/event → registry +
 //!   bootstrap) and [`run_tick`] (one-shot reconcile).
 //! - [`delivery`]: [`DeliveryWorker`] outbox drain + backoff policy.
+//! - [`nudge`]: [`NudgeManager`] stale-thread reminder prompts.
 //! - [`events`]: the `events.subscribe` subscription set.
 //! - [`daemon`]: [`Daemon`] threads, graceful shutdown, pidfile/lock
 //!   lifecycle helpers.
@@ -28,6 +29,7 @@ pub mod delivery;
 pub mod envelope;
 pub mod error;
 pub mod events;
+pub mod nudge;
 pub mod pools;
 pub mod registry_sync;
 pub mod rescue;
@@ -43,11 +45,12 @@ pub use delivery::{
     DEAD_NOTIFY_INTERVAL, DEFAULT_POLL_INTERVAL, OFFLINE_DEAD_AFTER,
 };
 pub use envelope::{
-    bootstrap_text, message_envelope, rescue_envelope, BOOTSTRAP_VERSION, ENVELOPE_PREFIX,
-    RESCUE_PREFIX,
+    bootstrap_text, message_envelope, nudge_envelope, rescue_envelope, BOOTSTRAP_VERSION,
+    ENVELOPE_PREFIX, RESCUE_PREFIX,
 };
 pub use error::{Result, RouterError};
 pub use events::{static_subscriptions, subscriptions_for};
+pub use nudge::{NudgeManager, NUDGE_AFTER, NUDGE_REPEAT, NUDGE_SCAN_INTERVAL};
 pub use pools::Pools;
 pub use registry_sync::{run_tick, Bootstrapper, Notify, RegistrySync, SyncOutcome};
 pub use rescue::{

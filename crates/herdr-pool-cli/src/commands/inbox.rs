@@ -55,6 +55,9 @@ fn list_inbox(ctx: &Ctx, env: &EnvLookup<'_>, unread: bool, follow: bool) -> Cmd
         return Ok(());
     }
 
+    // Peer-facing ids: prefer the sender's pane id (what the Herdr UI
+    // shows) over the internal `ag_*` pool id.
+    let handles = agent_handles(&pool);
     if messages.is_empty() {
         println!(
             "{}",
@@ -66,17 +69,44 @@ fn list_inbox(ctx: &Ctx, env: &EnvLookup<'_>, unread: bool, follow: bool) -> Cmd
         );
         return Ok(());
     }
-    println!("{}", inbox_table(&messages));
+    println!("{}", inbox_table(&messages, &handles));
     Ok(())
 }
 
-fn inbox_rows(messages: &[Message]) -> Vec<Vec<String>> {
+/// `agent_id` → display handle (pane id, else name, else the `ag_*` id)
+/// for every registered agent in this scope, live or offline — senders of
+/// old mail may no longer be live.
+fn agent_handles(pool: &PoolContext) -> std::collections::HashMap<String, String> {
+    pool.pool
+        .registry()
+        .list_agents(true)
+        .unwrap_or_default()
+        .iter()
+        .map(|r| {
+            let handle = r
+                .pane_id
+                .clone()
+                .filter(|p| !p.is_empty())
+                .or_else(|| r.name.clone().filter(|n| !n.is_empty()))
+                .unwrap_or_else(|| r.agent_id.clone());
+            (r.agent_id.clone(), handle)
+        })
+        .collect()
+}
+
+fn inbox_rows(
+    messages: &[Message],
+    handles: &std::collections::HashMap<String, String>,
+) -> Vec<Vec<String>> {
     messages
         .iter()
         .map(|m| {
             vec![
                 m.id.clone(),
-                m.from_agent.clone(),
+                handles
+                    .get(&m.from_agent)
+                    .cloned()
+                    .unwrap_or_else(|| m.from_agent.clone()),
                 m.kind.clone(),
                 m.status.to_string(),
                 fmt_time(m.created_at),
@@ -86,10 +116,13 @@ fn inbox_rows(messages: &[Message]) -> Vec<Vec<String>> {
         .collect()
 }
 
-fn inbox_table(messages: &[Message]) -> String {
+fn inbox_table(
+    messages: &[Message],
+    handles: &std::collections::HashMap<String, String>,
+) -> String {
     table_string(
         &["ID", "FROM", "KIND", "STATUS", "TIME", "SNIPPET"],
-        &inbox_rows(messages),
+        &inbox_rows(messages, handles),
     )
 }
 
@@ -142,7 +175,7 @@ fn follow_inbox(pool: &PoolContext, agent_id: &str, mut unread: bool) -> CmdResu
                     "inbox is empty".to_string()
                 }
             }
-            Ok(messages) => inbox_table(&messages),
+            Ok(messages) => inbox_table(&messages, &agent_handles(pool)),
             Err(err) => format!("inbox error: {err}"),
         };
         let scope = if unread { "unread" } else { "all" };
@@ -197,9 +230,25 @@ pub fn read_message(ctx: &Ctx, env: &EnvLookup<'_>, id: &str) -> CmdResult<()> {
     if ctx.json {
         emit_json(&MessageJson::from(&msg));
     } else {
+        let from_display = pool
+            .pool
+            .registry()
+            .get_agent(&msg.from_agent)
+            .ok()
+            .flatten()
+            .map(|r| {
+                let handle = r
+                    .pane_id
+                    .clone()
+                    .filter(|p| !p.is_empty())
+                    .or_else(|| r.name.clone().filter(|n| !n.is_empty()))
+                    .unwrap_or_else(|| r.agent_id.clone());
+                format!("{handle} ({})", msg.from_agent)
+            })
+            .unwrap_or_else(|| msg.from_agent.clone());
         println!("id:         {}", msg.id);
         println!("thread:     {}", msg.thread_id.as_deref().unwrap_or("-"));
-        println!("from:       {}", msg.from_agent);
+        println!("from:       {from_display}");
         println!("status:     {}", msg.status);
         println!("created:    {}", fmt_time(msg.created_at));
         if let Some(t) = msg.delivered_at {

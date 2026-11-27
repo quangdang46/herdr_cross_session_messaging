@@ -37,6 +37,7 @@ use herdr_protocol::{
 
 use crate::envelope::message_envelope;
 use crate::error::Result;
+use crate::nudge::NudgeManager;
 use crate::pools::Pools;
 use crate::registry_sync::{now_millis, Notify};
 use crate::rescue::RescueManager;
@@ -105,6 +106,8 @@ pub struct DeliveryWorker {
     last_blocked_notify: std::cell::RefCell<std::collections::HashMap<String, std::time::Instant>>,
     /// Peer TUI rescue coordinator (detection, dispatch, monitoring).
     rescue: RescueManager,
+    /// Stale-thread reminder sweeper (unanswered delivered mail).
+    nudge: NudgeManager,
     /// Toast the user on every successful delivery (`HERDR_POOL_NOTIFY_DELIVERY`).
     notify_on_delivery: bool,
 }
@@ -119,6 +122,7 @@ impl DeliveryWorker {
     ) -> Self {
         Self {
             rescue: RescueManager::new(client.clone(), Arc::clone(&pools)),
+            nudge: NudgeManager::new(client.clone(), Arc::clone(&pools)),
             client,
             pools,
             shutdown,
@@ -142,6 +146,20 @@ impl DeliveryWorker {
         self.rescue.set_max_attempts(max_attempts);
         self.rescue.set_assigned_stale(assigned_stale);
         self
+    }
+
+    /// Override the nudge sweep timings (tests).
+    pub fn with_nudge_timings(mut self, after: Duration, repeat: Duration) -> Self {
+        self.nudge = NudgeManager::new(self.client.clone(), Arc::clone(&self.pools))
+            .with_timings(after, repeat);
+        self
+    }
+
+    /// Run one nudge sweep (unanswered-mail reminders). Internally
+    /// throttled to [`crate::nudge::NUDGE_SCAN_INTERVAL`]; called by
+    /// [`Self::run`] every poll and exposed for tests.
+    pub fn sweep_nudges(&self) {
+        self.nudge.sweep();
     }
 
     /// Run one rescue sweep (detect → expire → monitor → dispatch).
@@ -174,6 +192,7 @@ impl DeliveryWorker {
             if let Err(err) = self.sweep_rescue() {
                 tracing::warn!(error = %err, "rescue sweep failed");
             }
+            self.nudge.sweep();
             let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
             let (guard, _) = cvar
                 .wait_timeout(guard, self.poll_interval)

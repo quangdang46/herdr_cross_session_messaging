@@ -145,6 +145,8 @@ pub struct ThreadSummaryJson {
     /// The other party's `agent_id` (peer relative to the caller).
     pub peer_agent_id: Option<String>,
     pub peer_name: Option<String>,
+    /// The peer's current pane id — the handle shown in the Herdr UI.
+    pub peer_pane_id: Option<String>,
     pub peer_agent_kind: Option<String>,
     /// Messages addressed to the caller not yet acknowledged.
     pub unread_count: i64,

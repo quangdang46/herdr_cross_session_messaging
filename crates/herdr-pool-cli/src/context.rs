@@ -422,6 +422,18 @@ pub fn resolve_peer(pool: &PoolContext, query: &str) -> CmdResult<AgentRecord> {
         .map_err(Failure::from)
 }
 
+/// Peer-facing display handle for a registry record: the pane id first
+/// (the id agents see in the Herdr UI and can paste into `send`), then
+/// the agent name, then the stable `ag_*` pool id.
+pub fn agent_handle(record: &AgentRecord) -> String {
+    record
+        .pane_id
+        .clone()
+        .filter(|p| !p.is_empty())
+        .or_else(|| record.name.clone().filter(|n| !n.is_empty()))
+        .unwrap_or_else(|| record.agent_id.clone())
+}
+
 /// Current delivery target for a registry record. `agent.prompt` accepts
 /// pane_id and agent name but NOT terminal_id (term_* → agent_not_found),
 /// so pane_id is preferred (kept current by pane.moved rekeys), then name,

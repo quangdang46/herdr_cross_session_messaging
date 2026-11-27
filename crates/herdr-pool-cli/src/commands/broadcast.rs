@@ -11,8 +11,8 @@ use serde::Serialize;
 
 use crate::commands::deliver::deliver;
 use crate::context::{
-    ensure_daemon, open_identity_pool, refresh_registry, resolve_identity, upsert_self, CmdResult,
-    Ctx, Failure,
+    agent_handle, ensure_daemon, open_identity_pool, refresh_registry, resolve_identity,
+    upsert_self, CmdResult, Ctx, Failure,
 };
 use crate::output::{emit_json, print_table, MessageJson};
 
@@ -27,6 +27,7 @@ struct BroadcastJson {
 #[derive(Serialize)]
 struct DeliveryJson {
     agent_id: String,
+    pane_id: Option<String>,
     name: Option<String>,
     message: MessageJson,
 }
@@ -70,6 +71,7 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, text: &str) -> CmdResult<()> {
         let delivered = deliver(ctx, &pool, &msg, &self_record)?;
         deliveries.push(DeliveryJson {
             agent_id: peer.agent_id.clone(),
+            pane_id: peer.pane_id.clone(),
             name: peer.name.clone(),
             message: MessageJson::from(&delivered),
         });
@@ -81,10 +83,12 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, text: &str) -> CmdResult<()> {
             deliveries,
         });
     } else {
-        let rows: Vec<Vec<String>> = deliveries
+        let rows: Vec<Vec<String>> = peers
             .iter()
-            .map(|d| {
+            .zip(deliveries.iter())
+            .map(|(peer, d)| {
                 vec![
+                    agent_handle(peer),
                     d.agent_id.clone(),
                     d.name.clone().unwrap_or_else(|| "-".into()),
                     d.message.id.clone(),
@@ -92,7 +96,7 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, text: &str) -> CmdResult<()> {
                 ]
             })
             .collect();
-        print_table(&["AGENT", "NAME", "MSG", "STATUS"], &rows);
+        print_table(&["PEER", "AGENT", "NAME", "MSG", "STATUS"], &rows);
         println!("broadcast to {} peer(s)", deliveries.len());
     }
     Ok(())

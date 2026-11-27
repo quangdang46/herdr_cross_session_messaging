@@ -9,6 +9,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Stale-thread reminders: the router daemon now scans each pool every 60s
+  for `delivered` messages whose recipient has posted nothing newer in the
+  same thread for `NUDGE_AFTER` (default 10 min) and sends the recipient a
+  gentle `[herdr-pool] reminder` prompt suggesting they proactively
+  continue the conversation — a router-generated prompt, never a stored
+  pool message, throttled to one per message per 30 min per daemon run.
+  Honors the same readiness gates as delivery (offline, blocked,
+  `interactive_ready`/`launch_pending`). `HERDR_POOL_NUDGE=0` disables;
+  `HERDR_POOL_NUDGE_MINUTES` tunes the threshold.
+- Peer-facing surfaces now prefer the pane id (`w1:p2`) — the handle shown
+  in the Herdr UI — over the internal `ag_*` pool id: the `[herdr-pool]
+  msg` delivery envelope shows `from <kind> (<pane_id>)`, `peers` gained a
+  `PANE` column, `inbox`/`message read`/`threads`/`send`/`reply` human
+  output resolve senders to their pane id. `ag_*` ids remain the stable
+  wire/API identifiers.
 - `herdr-pool clean [--older-than DAYS] [--dry-run]` — prune terminal
   rows across all project pools: `acknowledged`/`dead` messages,
   unreferenced `offline`/`unknown` agent records, and emptied threads,
