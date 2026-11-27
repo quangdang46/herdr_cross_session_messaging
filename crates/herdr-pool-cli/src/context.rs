@@ -1,10 +1,10 @@
 //! Shared runtime context and cross-command helpers.
 //!
-//! [`Ctx`] bundles what every command needs: the [`HerdrClient`] (built from
-//! `--socket-path` or the standard env resolution) and the plugin state dir
-//! (`--state-dir` or [`herdr_plugin::paths::state_dir`]). Commands that talk
-//! to the pool additionally resolve *self* ([`resolve_identity`]) and open
-//! the scope's [`PoolContext`].
+//! [`Ctx`] bundles what every command needs: the selected [`AgentRuntime`]
+//! (herdr socket by default, hc via `HERDR_POOL_RUNTIME=hc`) and the plugin
+//! state dir (`--state-dir` or [`herdr_plugin::paths::state_dir`]). Commands
+//! that talk to the pool additionally resolve *self* ([`resolve_identity`])
+//! and open the scope's [`PoolContext`].
 //!
 //! ## Project-path / scope resolution decision
 //!
@@ -17,14 +17,16 @@
 //! clear `MissingEnv` error; `install`/`uninstall`/`doctor` accept
 //! `--project`/cwd for the cases that don't need an agent identity.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use herdr_plugin::paths::{self, EnvLookup};
 use herdr_pool_core::{CoreError, PoolContext, SelfIdentity};
 use herdr_pool_store::AgentRecord;
 use herdr_protocol::HerdrClient;
-use herdr_runtime::HerdrRuntime;
+use herdr_runtime::{AgentRuntime, HcRuntime, HerdrRuntime};
 
 use crate::cli::Globals;
 
@@ -123,12 +125,78 @@ impl From<herdr_plugin::PluginError> for Failure {
 /// Command result alias.
 pub type CmdResult<T> = Result<T, Failure>;
 
+/// Backend selected for this CLI invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeKind {
+    /// Herdr socket API (`HERDR_*` pane env, `HERDR_PANE_ID` handles).
+    Herdr,
+    /// hc terminal runtime (`HC_TERMINAL_ID`, `t7`/`machine/t7` handles).
+    Hc,
+}
+
+impl RuntimeKind {
+    /// Stable name for env propagation and diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Herdr => "herdr",
+            Self::Hc => "hc",
+        }
+    }
+}
+
+/// Env var selecting the agent runtime (`herdr` default, `hc` opt-in).
+pub const RUNTIME_ENV_VAR: &str = "HERDR_POOL_RUNTIME";
+/// Optional override for the `hc connect` argv (JSON-RPC over stdio).
+pub const HC_CONNECT_CMD_ENV_VAR: &str = "HC_CONNECT_CMD";
+
+enum RuntimeFactory {
+    Herdr(HerdrClient),
+    Hc {
+        program: OsString,
+        args: Vec<OsString>,
+    },
+}
+
+struct RuntimeCell {
+    factory: Option<RuntimeFactory>,
+    runtime: Option<Arc<dyn AgentRuntime>>,
+}
+
+impl RuntimeFactory {
+    fn hc_command(&self) -> Option<std::process::Command> {
+        let RuntimeFactory::Hc { program, args } = self else {
+            return None;
+        };
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(args);
+        Some(cmd)
+    }
+
+    fn build(&self) -> CmdResult<Arc<dyn AgentRuntime>> {
+        match self {
+            Self::Herdr(client) => {
+                let runtime: Arc<dyn AgentRuntime> = Arc::new(HerdrRuntime::new(client.clone()));
+                Ok(runtime)
+            }
+            Self::Hc { .. } => {
+                let cmd = self
+                    .hc_command()
+                    .ok_or_else(|| Failure::runtime("invalid hc runtime factory"))?;
+                let runtime = HcRuntime::connect(cmd)
+                    .map_err(|e| Failure::runtime(format!("connect hc runtime: {e}")))?;
+                let runtime: Arc<dyn AgentRuntime> = Arc::new(runtime);
+                Ok(runtime)
+            }
+        }
+    }
+}
+
 /// Everything a command needs that isn't per-subcommand arguments.
 pub struct Ctx {
     /// `--json` human/machine output switch.
     pub json: bool,
-    /// Socket client (`--socket-path` or env-resolved).
-    pub client: HerdrClient,
+    runtime_kind: RuntimeKind,
+    runtime: Mutex<RuntimeCell>,
     /// Plugin state dir (`--state-dir` or env-resolved).
     pub state_dir: PathBuf,
     /// `--socket-path` override, propagated to spawned `herdr-routerd` via
@@ -143,10 +211,28 @@ pub struct Ctx {
 impl Ctx {
     /// Build a context from the global CLI flags.
     pub fn from_globals(globals: &Globals) -> CmdResult<Self> {
-        let client = match &globals.socket_path {
-            Some(path) => HerdrClient::from_socket_path(path.clone()),
-            None => HerdrClient::new()
-                .map_err(|e| Failure::runtime(format!("resolve Herdr socket path: {e}")))?,
+        Self::from_globals_with_env(globals, &|key| std::env::var_os(key))
+    }
+
+    /// Build a context with an explicit env lookup (tests).
+    pub fn from_globals_with_env(globals: &Globals, env: &EnvLookup<'_>) -> CmdResult<Self> {
+        let runtime_kind = runtime_kind_from_env(env)?;
+        let socket_path_override = globals.socket_path.clone();
+        if runtime_kind == RuntimeKind::Hc && socket_path_override.is_some() {
+            return Err(Failure::usage(
+                "--socket-path requires HERDR_POOL_RUNTIME=herdr",
+            ));
+        }
+        let factory = match runtime_kind {
+            RuntimeKind::Herdr => {
+                let client = match &socket_path_override {
+                    Some(path) => HerdrClient::from_socket_path(path.clone()),
+                    None => HerdrClient::new()
+                        .map_err(|e| Failure::runtime(format!("resolve Herdr socket path: {e}")))?,
+                };
+                RuntimeFactory::Herdr(client)
+            }
+            RuntimeKind::Hc => hc_factory(env)?,
         };
         let state_dir = match &globals.state_dir {
             Some(dir) => dir.clone(),
@@ -155,32 +241,114 @@ impl Ctx {
         };
         Ok(Self {
             json: globals.json,
-            client,
+            runtime_kind,
+            runtime: Mutex::new(RuntimeCell {
+                factory: Some(factory),
+                runtime: None,
+            }),
             state_dir,
-            socket_path_override: globals.socket_path.clone(),
+            socket_path_override,
             autostart_daemon: true,
         })
     }
 
-    /// The backend runtime for this client. Pool-core identity/scope/
-    /// registry helpers take `&dyn AgentRuntime`; wrapping the concrete
-    /// `HerdrClient` here keeps herdr behavior identical until
-    /// `cli-context-port` swaps `Ctx` onto a runtime selection.
-    pub fn runtime(&self) -> HerdrRuntime {
-        HerdrRuntime::new(self.client.clone())
+    /// The selected backend kind.
+    pub fn runtime_kind(&self) -> RuntimeKind {
+        self.runtime_kind
+    }
+
+    /// The agent runtime for this client. Herdr is cheap to construct;
+    /// hc defers `hc connect` until the first runtime call so commands that
+    /// never touch the backend (`version`, `install`, daemon controls) do
+    /// not require `hc` on PATH.
+    pub fn runtime(&self) -> CmdResult<Arc<dyn AgentRuntime>> {
+        let mut cell = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(runtime) = &cell.runtime {
+            return Ok(runtime.clone());
+        }
+        let factory = cell
+            .factory
+            .as_ref()
+            .ok_or_else(|| Failure::runtime("runtime backend already consumed"))?;
+        let runtime = factory.build()?;
+        cell.runtime = Some(runtime.clone());
+        cell.factory = None;
+        Ok(runtime)
+    }
+
+    /// The underlying Herdr client for herdr-only surfaces (plugin panel,
+    /// socket diagnostics). Returns `None` on hc without connecting.
+    pub fn herdr_client(&self) -> Option<HerdrClient> {
+        let cell = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(runtime) = &cell.runtime {
+            return runtime.herdr_client().cloned();
+        }
+        match &cell.factory {
+            Some(RuntimeFactory::Herdr(client)) => Some(client.clone()),
+            _ => None,
+        }
     }
 
     /// Explicit constructor (unit tests).
     #[cfg(all(test, unix))]
     pub fn for_test(json: bool, client: HerdrClient, state_dir: PathBuf) -> Self {
+        let runtime: Arc<dyn AgentRuntime> = Arc::new(HerdrRuntime::new(client));
+        Self::for_test_runtime(json, runtime, RuntimeKind::Herdr, state_dir)
+    }
+
+    /// Explicit constructor for an injected runtime (unit tests).
+    #[cfg(all(test, unix))]
+    pub fn for_test_runtime(
+        json: bool,
+        runtime: Arc<dyn AgentRuntime>,
+        runtime_kind: RuntimeKind,
+        state_dir: PathBuf,
+    ) -> Self {
         Self {
             json,
-            client,
+            runtime_kind,
+            runtime: Mutex::new(RuntimeCell {
+                factory: None,
+                runtime: Some(runtime),
+            }),
             state_dir,
             socket_path_override: None,
             autostart_daemon: false,
         }
     }
+}
+
+fn env_value(env: &EnvLookup<'_>, key: &str) -> Option<OsString> {
+    env(key).filter(|value| !value.is_empty())
+}
+
+fn runtime_kind_from_env(env: &EnvLookup<'_>) -> CmdResult<RuntimeKind> {
+    let Some(value) = env_value(env, RUNTIME_ENV_VAR) else {
+        return Ok(RuntimeKind::Herdr);
+    };
+    let value = value.to_string_lossy();
+    if value.eq_ignore_ascii_case("herdr") {
+        Ok(RuntimeKind::Herdr)
+    } else if value.eq_ignore_ascii_case("hc") {
+        Ok(RuntimeKind::Hc)
+    } else {
+        Err(Failure::usage(format!(
+            "invalid {RUNTIME_ENV_VAR} '{value}' (expected herdr|hc)"
+        )))
+    }
+}
+
+fn hc_factory(env: &EnvLookup<'_>) -> CmdResult<RuntimeFactory> {
+    if let Some(connect) = env_value(env, HC_CONNECT_CMD_ENV_VAR) {
+        return Ok(RuntimeFactory::Hc {
+            program: OsString::from("sh"),
+            args: vec![OsString::from("-c"), connect],
+        });
+    }
+    Ok(RuntimeFactory::Hc {
+        program: OsString::from("hc"),
+        args: vec![OsString::from("connect"), OsString::from("--json")],
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -191,7 +359,7 @@ impl Ctx {
 /// get_pane`/`get_agent` → scope). Fails with exit-code-2 `MissingEnv`
 /// outside a managed pane/terminal.
 pub fn resolve_identity(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<SelfIdentity> {
-    Ok(herdr_pool_core::resolve_self(&ctx.runtime(), env)?)
+    Ok(herdr_pool_core::resolve_self(ctx.runtime()?.as_ref(), env)?)
 }
 
 /// Open the pool for an already-resolved identity's scope.
@@ -214,13 +382,17 @@ pub fn upsert_self(pool: &PoolContext, identity: &SelfIdentity) -> CmdResult<Age
 /// *agent* records that vanished offline. See
 /// [`herdr_pool_core::refresh_registry`].
 pub fn refresh_registry(ctx: &Ctx, pool: &PoolContext) -> CmdResult<usize> {
-    Ok(herdr_pool_core::refresh_registry(&ctx.runtime(), pool)?)
+    Ok(herdr_pool_core::refresh_registry(
+        ctx.runtime()?.as_ref(),
+        pool,
+    )?)
 }
 
-/// Resolve a peer query (`ag_*` id, pane/terminal id, name) inside this
-/// scope's registry. The registry is per-scope by construction, so a
-/// cross-scope hit is impossible; a foreign-looking query simply finds
-/// nothing → `NotFound`/`Ambiguous` (exit 2).
+/// Resolve a peer query (`ag_*` id, runtime handle/pane id/terminal
+/// address, name) inside this scope's registry. The registry is
+/// per-scope by construction, so a cross-scope hit is impossible; a
+/// foreign-looking query simply finds nothing → `NotFound`/`Ambiguous`
+/// (exit 2).
 pub fn resolve_peer(pool: &PoolContext, query: &str) -> CmdResult<AgentRecord> {
     pool.pool
         .registry()
@@ -228,9 +400,10 @@ pub fn resolve_peer(pool: &PoolContext, query: &str) -> CmdResult<AgentRecord> {
         .map_err(Failure::from)
 }
 
-/// Peer-facing display handle for a registry record: the pane id first
-/// (the id agents see in the Herdr UI and can paste into `send`), then
-/// the agent name, then the stable `ag_*` pool id.
+/// Peer-facing display handle for a registry record: the runtime handle
+/// first (pane id on herdr, terminal address on hc — the id agents see in
+/// the UI and can paste into `send`), then the agent name, then the
+/// stable `ag_*` pool id.
 pub fn agent_handle(record: &AgentRecord) -> String {
     record
         .pane_id
@@ -240,10 +413,12 @@ pub fn agent_handle(record: &AgentRecord) -> String {
         .unwrap_or_else(|| record.agent_id.clone())
 }
 
-/// Current delivery target for a registry record. `agent.prompt` accepts
-/// pane_id and agent name but NOT terminal_id (term_* → agent_not_found),
-/// so pane_id is preferred (kept current by pane.moved rekeys), then name,
-/// then terminal_id as a last resort. Mirrors the router delivery worker.
+/// Current delivery target for a registry record. The `pane_id` column
+/// stores the runtime handle verbatim (pane id on herdr, terminal address
+/// on hc); herdr's `agent.prompt` accepts pane_id and agent name but NOT
+/// terminal_id (term_* → agent_not_found), so pane_id is preferred (kept
+/// current by pane.moved rekeys), then name, then terminal_id as a last
+/// resort for legacy herdr records. Mirrors the router delivery worker.
 pub fn delivery_target(record: &AgentRecord) -> Option<String> {
     record
         .pane_id
@@ -276,7 +451,9 @@ pub fn ensure_daemon(ctx: &Ctx) -> CmdResult<()> {
     // when --state-dir overrode the env resolution. Same for --socket-path:
     // the daemon resolves its socket from HERDR_SOCKET_PATH, so an explicit
     // flag must be exported or the daemon would attach to a different server.
+    // HERDR_POOL_RUNTIME selects the same backend inside routerd.
     cmd.env("HERDR_POOL_STATE_DIR", &ctx.state_dir);
+    cmd.env(RUNTIME_ENV_VAR, ctx.runtime_kind.as_str());
     if let Some(path) = &ctx.socket_path_override {
         cmd.env("HERDR_SOCKET_PATH", path);
     }
@@ -452,5 +629,201 @@ mod tests {
         // Plain shell panes invoked directly stay addressable — only the
         // plugin-context path skips the write.
         assert_eq!(pool.pool.registry().list_agents(false).unwrap().len(), 1);
+    }
+
+    // -- runtime selection ----------------------------------------------------
+
+    fn globals(state_dir: &std::path::Path, socket_path: Option<PathBuf>) -> Globals {
+        Globals {
+            json: false,
+            socket_path,
+            state_dir: Some(state_dir.to_path_buf()),
+            verbose: false,
+        }
+    }
+
+    #[test]
+    fn runtime_defaults_to_herdr() {
+        let f = Fixture::new();
+        let globals = globals(f.state.path(), Some(f.server.socket_path().to_path_buf()));
+        let ctx =
+            Ctx::from_globals_with_env(&globals, &|_: &str| -> Option<OsString> { None }).unwrap();
+        assert_eq!(ctx.runtime_kind(), RuntimeKind::Herdr);
+        assert!(ctx.herdr_client().is_some());
+    }
+
+    #[test]
+    fn runtime_hc_selection_defers_connect() {
+        let f = Fixture::new();
+        let mut map = HashMap::new();
+        map.insert(RUNTIME_ENV_VAR.to_string(), OsString::from("hc"));
+        let lookup = env_from_map(&map);
+        let globals = globals(f.state.path(), None);
+        // Building the context must not spawn `hc connect` — the runtime
+        // connects lazily on the first backend call.
+        let ctx = Ctx::from_globals_with_env(&globals, &lookup).unwrap();
+        assert_eq!(ctx.runtime_kind(), RuntimeKind::Hc);
+        assert!(ctx.herdr_client().is_none());
+    }
+
+    #[test]
+    fn runtime_hc_rejects_socket_path_override() {
+        let f = Fixture::new();
+        let mut map = HashMap::new();
+        map.insert(RUNTIME_ENV_VAR.to_string(), OsString::from("hc"));
+        let lookup = env_from_map(&map);
+        let globals = globals(f.state.path(), Some(PathBuf::from("/tmp/herdr.sock")));
+        let err = Ctx::from_globals_with_env(&globals, &lookup)
+            .err()
+            .expect("hc + --socket-path must fail");
+        assert_eq!(err.code, 2);
+        assert!(err.message.contains("--socket-path"));
+    }
+
+    #[test]
+    fn runtime_kind_rejects_unknown_value() {
+        let f = Fixture::new();
+        let mut map = HashMap::new();
+        map.insert(RUNTIME_ENV_VAR.to_string(), OsString::from("bogus"));
+        let lookup = env_from_map(&map);
+        let globals = globals(f.state.path(), None);
+        let err = Ctx::from_globals_with_env(&globals, &lookup)
+            .err()
+            .expect("unknown runtime must fail");
+        assert_eq!(err.code, 2);
+        assert!(err.message.contains("invalid"));
+    }
+
+    // -- runtime-agnostic identity --------------------------------------------
+
+    /// Minimal in-memory [`AgentRuntime`] — just enough record surface for
+    /// `resolve_self` (pane + optional agent record), everything else
+    /// unsupported.
+    struct StubRuntime {
+        pane: herdr_runtime::RuntimeAgent,
+        agent: Option<herdr_runtime::RuntimeAgent>,
+    }
+
+    impl StubRuntime {
+        fn agent(handle: &str, cwd: &str) -> herdr_runtime::RuntimeAgent {
+            herdr_runtime::RuntimeAgent {
+                handle: handle.to_string(),
+                terminal_id: None,
+                kind: Some("claude".to_string()),
+                name: Some("self".to_string()),
+                cwd: Some(cwd.to_string()),
+                foreground_cwd: Some(cwd.to_string()),
+                status: herdr_runtime::RuntimeStatus::Idle,
+                interactive_ready: true,
+                launch_pending: false,
+                extra: Default::default(),
+            }
+        }
+    }
+
+    impl AgentRuntime for StubRuntime {
+        fn list_agents(
+            &self,
+        ) -> Result<Vec<herdr_runtime::RuntimeAgent>, herdr_runtime::RuntimeError> {
+            Ok(self.agent.iter().cloned().collect())
+        }
+
+        fn get_agent(
+            &self,
+            handle: &str,
+        ) -> Result<herdr_runtime::RuntimeAgent, herdr_runtime::RuntimeError> {
+            self.agent
+                .clone()
+                .filter(|a| a.handle == handle)
+                .ok_or_else(|| herdr_runtime::RuntimeError::NotFound {
+                    handle: handle.to_string(),
+                })
+        }
+
+        fn get_pane(
+            &self,
+            _handle: &str,
+        ) -> Result<herdr_runtime::RuntimeAgent, herdr_runtime::RuntimeError> {
+            Ok(self.pane.clone())
+        }
+
+        fn send_prompt(
+            &self,
+            _handle: &str,
+            _text: &str,
+        ) -> Result<herdr_runtime::SendOutcome, herdr_runtime::RuntimeError> {
+            Err(herdr_runtime::RuntimeError::Unsupported("stub".to_string()))
+        }
+
+        fn wait_agent(
+            &self,
+            _handle: &str,
+            _req: herdr_runtime::WaitRequest,
+        ) -> Result<herdr_runtime::WaitOutcome, herdr_runtime::RuntimeError> {
+            Err(herdr_runtime::RuntimeError::Unsupported("stub".to_string()))
+        }
+
+        fn read_agent(
+            &self,
+            _handle: &str,
+            _lines: u32,
+        ) -> Result<String, herdr_runtime::RuntimeError> {
+            Err(herdr_runtime::RuntimeError::Unsupported("stub".to_string()))
+        }
+
+        fn send_keys(
+            &self,
+            _handle: &str,
+            _keys: &[String],
+        ) -> Result<(), herdr_runtime::RuntimeError> {
+            Err(herdr_runtime::RuntimeError::Unsupported("stub".to_string()))
+        }
+
+        fn self_identity(
+            &self,
+            _env: &EnvLookup<'_>,
+        ) -> Result<herdr_runtime::SelfIdentity, herdr_runtime::RuntimeError> {
+            Err(herdr_runtime::RuntimeError::Unsupported("stub".to_string()))
+        }
+
+        fn subscribe_events(
+            &self,
+            _watched: &[String],
+        ) -> Result<herdr_runtime::EventStream, herdr_runtime::RuntimeError> {
+            Err(herdr_runtime::RuntimeError::Unsupported("stub".to_string()))
+        }
+    }
+
+    #[test]
+    fn resolve_identity_works_through_injected_runtime() {
+        let f = Fixture::new();
+        let cwd = f.project_cwd();
+        let runtime: Arc<dyn AgentRuntime> = Arc::new(StubRuntime {
+            pane: StubRuntime::agent("t7", &cwd),
+            agent: Some(StubRuntime::agent("t7", &cwd)),
+        });
+        let ctx = Ctx::for_test_runtime(
+            false,
+            runtime,
+            RuntimeKind::Hc,
+            f.state.path().to_path_buf(),
+        );
+
+        // hc identity is the bare terminal address — no HERDR_* vars.
+        let mut env_map = HashMap::new();
+        env_map.insert("HC_TERMINAL_ID".to_string(), OsString::from("t7"));
+        let lookup = env_from_map(&env_map);
+        let identity = resolve_identity(&ctx, &lookup).unwrap();
+        assert_eq!(identity.env.handle, "t7");
+        assert!(identity.workspace.is_none());
+        assert!(identity.tab.is_none());
+        assert_eq!(
+            identity.agent.as_ref().map(|a| a.name.as_deref()),
+            Some(Some("self"))
+        );
+        assert_eq!(
+            identity.canonical_path,
+            std::fs::canonicalize(f.project.path()).unwrap()
+        );
     }
 }

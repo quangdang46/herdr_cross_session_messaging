@@ -24,7 +24,8 @@ use herdr_plugin::paths::EnvLookup;
 use herdr_pool_core::identity;
 use herdr_protocol::results::ResponseResult;
 use herdr_protocol::{
-    PaneDirection, PaneInfo, PaneLayoutPane, PaneLayoutSnapshot, PaneResizeParams, PaneSwapParams,
+    HerdrClient, PaneDirection, PaneInfo, PaneLayoutPane, PaneLayoutSnapshot, PaneResizeParams,
+    PaneSwapParams,
 };
 use serde::Serialize;
 
@@ -60,33 +61,36 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, action: &PanelAction) -> CmdResult<()
     match action {
         PanelAction::Ensure => ensure_hook(ctx, env),
         PanelAction::Open | PanelAction::Close | PanelAction::Toggle | PanelAction::Status => {
-            let pane = context_pane(ctx, env)?
+            let client = ctx
+                .herdr_client()
+                .ok_or_else(|| Failure::usage("panel commands require HERDR_POOL_RUNTIME=herdr"))?;
+            let pane = context_pane(&client, env)?
                 .ok_or_else(|| Failure::usage("panel commands need a Herdr pane context"))?;
             match action {
                 PanelAction::Open => {
-                    let id = ensure_open(ctx, &pane, true)?;
+                    let id = ensure_open(ctx, &client, &pane, true)?;
                     report(ctx, &pane, Some(&id), true)
                 }
                 PanelAction::Close => {
-                    close_panel(ctx, &pane.tab_id);
+                    close_panel(ctx, &client, &pane.tab_id);
                     report(ctx, &pane, None, false)
                 }
                 PanelAction::Toggle => {
-                    if let Some(existing) = find_panel(ctx, &pane.tab_id)? {
-                        if tab_focused_pane(ctx, &pane)? == Some(existing.clone()) {
-                            close_panel(ctx, &pane.tab_id);
+                    if let Some(existing) = find_panel(ctx, &client, &pane.tab_id)? {
+                        if tab_focused_pane(&client, &pane)? == Some(existing.clone()) {
+                            close_panel(ctx, &client, &pane.tab_id);
                             report(ctx, &pane, None, false)
                         } else {
-                            ctx.client.pane_focus(&existing)?;
+                            client.pane_focus(&existing)?;
                             report(ctx, &pane, Some(&existing), true)
                         }
                     } else {
-                        let id = ensure_open(ctx, &pane, true)?;
+                        let id = ensure_open(ctx, &client, &pane, true)?;
                         report(ctx, &pane, Some(&id), true)
                     }
                 }
                 PanelAction::Status => {
-                    let panel = find_panel(ctx, &pane.tab_id)?;
+                    let panel = find_panel(ctx, &client, &pane.tab_id)?;
                     let open = panel.is_some();
                     report(ctx, &pane, panel.as_deref(), open)
                 }
@@ -103,22 +107,22 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, action: &PanelAction) -> CmdResult<()
 /// The pane whose tab the panel docks into. Interactive commands resolve
 /// the caller's own pane (agent env vars or plugin context JSON); `ensure`
 /// additionally falls back to the `[[events]]` payload.
-fn context_pane(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<Option<PaneInfo>> {
+fn context_pane(client: &HerdrClient, env: &EnvLookup<'_>) -> CmdResult<Option<PaneInfo>> {
     if let Ok(self_env) = identity::self_env_from(env) {
-        match ctx.client.pane_get(&self_env.handle) {
+        match client.pane_get(&self_env.handle) {
             Ok(pane) => return Ok(Some(pane)),
             Err(err) => {
                 tracing::debug!(pane = %self_env.handle, error = %err, "context pane.get failed");
             }
         }
     }
-    event_pane(ctx, env)
+    event_pane(client, env)
 }
 
 /// Resolve a pane inside the tab named by `HERDR_PLUGIN_EVENT_JSON`
 /// (`tab.created` / `workspace.created` hooks). `None` when the payload
 /// names no usable tab/workspace.
-fn event_pane(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<Option<PaneInfo>> {
+fn event_pane(client: &HerdrClient, env: &EnvLookup<'_>) -> CmdResult<Option<PaneInfo>> {
     let Some(raw) = env(ENV_PLUGIN_EVENT_JSON)
         .filter(|v| !v.is_empty())
         .map(|v| v.to_string_lossy().into_owned())
@@ -130,8 +134,8 @@ fn event_pane(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<Option<PaneInfo>> {
     };
     let scope = EventScope::find(&value);
     let panes = match (&scope.workspace_id, &scope.tab_id) {
-        (Some(ws), _) => ctx.client.pane_list(Some(ws))?,
-        (None, Some(_)) => ctx.client.pane_list(None)?,
+        (Some(ws), _) => client.pane_list(Some(ws))?,
+        (None, Some(_)) => client.pane_list(None)?,
         (None, None) => return Ok(None),
     };
     Ok(match &scope.tab_id {
@@ -211,14 +215,14 @@ fn clear_state(ctx: &Ctx, tab_id: &str) {
 /// The live panel pane for `tab_id`, verified against the server. Falls
 /// back to a label scan when the state file is missing or stale (e.g. the
 /// state dir was reset while the pane survived).
-fn find_panel(ctx: &Ctx, tab_id: &str) -> CmdResult<Option<String>> {
+fn find_panel(ctx: &Ctx, client: &HerdrClient, tab_id: &str) -> CmdResult<Option<String>> {
     if let Some(id) = read_state(ctx, tab_id) {
-        match ctx.client.pane_get(&id) {
+        match client.pane_get(&id) {
             Ok(pane) if pane.tab_id == tab_id => return Ok(Some(id)),
             _ => clear_state(ctx, tab_id),
         }
     }
-    let panes = ctx.client.pane_list(None)?;
+    let panes = client.pane_list(None)?;
     Ok(panes
         .into_iter()
         .find(|p| p.tab_id == tab_id && p.label.as_deref() == Some(PANEL_TITLE))
@@ -226,14 +230,14 @@ fn find_panel(ctx: &Ctx, tab_id: &str) -> CmdResult<Option<String>> {
 }
 
 /// The tab's currently focused pane id (via any pane's layout snapshot).
-fn tab_focused_pane(ctx: &Ctx, pane: &PaneInfo) -> CmdResult<Option<String>> {
-    let layout = ctx.client.pane_layout(Some(&pane.pane_id))?;
+fn tab_focused_pane(client: &HerdrClient, pane: &PaneInfo) -> CmdResult<Option<String>> {
+    let layout = client.pane_layout(Some(&pane.pane_id))?;
     Ok(Some(layout.focused_pane_id))
 }
 
-fn close_panel(ctx: &Ctx, tab_id: &str) {
-    if let Ok(Some(id)) = find_panel(ctx, tab_id) {
-        if let Err(err) = ctx.client.pane_close(&id) {
+fn close_panel(ctx: &Ctx, client: &HerdrClient, tab_id: &str) {
+    if let Ok(Some(id)) = find_panel(ctx, client, tab_id) {
+        if let Err(err) = client.pane_close(&id) {
             tracing::debug!(pane = %id, error = %err, "panel close failed");
         }
     }
@@ -246,16 +250,21 @@ fn close_panel(ctx: &Ctx, tab_id: &str) {
 
 /// Open the panel in `ctx_pane`'s tab when absent; focus it when `focus`.
 /// Returns the panel pane id. Idempotent: an existing panel is just focused.
-fn ensure_open(ctx: &Ctx, ctx_pane: &PaneInfo, focus: bool) -> CmdResult<String> {
-    if let Some(existing) = find_panel(ctx, &ctx_pane.tab_id)? {
+fn ensure_open(
+    ctx: &Ctx,
+    client: &HerdrClient,
+    ctx_pane: &PaneInfo,
+    focus: bool,
+) -> CmdResult<String> {
+    if let Some(existing) = find_panel(ctx, client, &ctx_pane.tab_id)? {
         if focus {
-            ctx.client.pane_focus(&existing)?;
+            client.pane_focus(&existing)?;
         }
         return Ok(existing);
     }
 
     let config = PoolConfig::load();
-    let layout = ctx.client.pane_layout(Some(&ctx_pane.pane_id))?;
+    let layout = client.pane_layout(Some(&ctx_pane.pane_id))?;
     let edge = edge_pane(&layout).ok_or_else(|| {
         Failure::runtime(format!(
             "tab {} has no sizeable pane to split",
@@ -279,11 +288,11 @@ fn ensure_open(ctx: &Ctx, ctx_pane: &PaneInfo, focus: bool) -> CmdResult<String>
     {
         params["cwd"] = serde_json::Value::String(cwd.to_string());
     }
-    let pane_id = plugin_pane_open(ctx, &params)?;
+    let pane_id = plugin_pane_open(client, &params)?;
 
     // Move the new pane into the left slot, then move its interior edge to
     // the computed share (plugin.pane.open always splits 50/50).
-    ctx.client.pane_swap(&PaneSwapParams {
+    client.pane_swap(&PaneSwapParams {
         pane_id: None,
         source_pane_id: Some(pane_id.clone()),
         target_pane_id: Some(edge.pane_id.clone()),
@@ -291,7 +300,7 @@ fn ensure_open(ctx: &Ctx, ctx_pane: &PaneInfo, focus: bool) -> CmdResult<String>
     })?;
     let delta = (share - 0.5).abs();
     if delta >= RESIZE_EPSILON {
-        let _ = ctx.client.pane_resize(&PaneResizeParams {
+        let _ = client.pane_resize(&PaneResizeParams {
             direction: PaneDirection::Left,
             pane_id: Some(pane_id.clone()),
             amount: Some(delta),
@@ -300,11 +309,11 @@ fn ensure_open(ctx: &Ctx, ctx_pane: &PaneInfo, focus: bool) -> CmdResult<String>
 
     write_state(ctx, &ctx_pane.tab_id, &pane_id);
     if focus {
-        ctx.client.pane_focus(&pane_id)?;
+        client.pane_focus(&pane_id)?;
     } else {
         // plugin.pane.open/swap can still move focus on some versions —
         // restore the pane that had it before we touched the layout.
-        let _ = ctx.client.pane_focus(&layout.focused_pane_id);
+        let _ = client.pane_focus(&layout.focused_pane_id);
     }
     Ok(pane_id)
 }
@@ -328,8 +337,8 @@ fn split_share(edge: &PaneLayoutPane, width_cols: u16) -> f64 {
 /// `plugin.pane.open` via the escape-hatch `call_raw` — the result type
 /// (`plugin_pane_opened`) is newer than this client's typed enum, so it
 /// arrives as [`ResponseResult::Unknown`] with the raw object preserved.
-fn plugin_pane_open(ctx: &Ctx, params: &serde_json::Value) -> CmdResult<String> {
-    match ctx.client.call_raw("plugin.pane.open", params)? {
+fn plugin_pane_open(client: &HerdrClient, params: &serde_json::Value) -> CmdResult<String> {
+    match client.call_raw("plugin.pane.open", params)? {
         ResponseResult::Unknown { raw, .. } => raw
             .pointer("/plugin_pane/pane/pane_id")
             .and_then(|v| v.as_str())
@@ -356,10 +365,14 @@ fn ensure_hook(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<()> {
     if !PoolConfig::load().panel_autostart {
         return Ok(());
     }
-    let Some(pane) = context_pane(ctx, env)? else {
+    let Some(client) = ctx.herdr_client() else {
+        tracing::debug!("panel ensure skipped: herdr runtime not selected");
         return Ok(());
     };
-    match ensure_open(ctx, &pane, false) {
+    let Some(pane) = context_pane(&client, env)? else {
+        return Ok(());
+    };
+    match ensure_open(ctx, &client, &pane, false) {
         Ok(id) => {
             if ctx.json {
                 emit_json(&serde_json::json!({ "open": true, "pane_id": id }));

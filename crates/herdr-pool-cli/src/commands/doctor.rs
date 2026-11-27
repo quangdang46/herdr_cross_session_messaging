@@ -1,8 +1,9 @@
 //! `herdr-pool doctor [--project DIR] [--json]` — read-only diagnostics.
 //!
-//! Checks: `HERDR_*` pane env, socket `ping` (version/protocol), scope
-//! resolution, pool db migration state, router daemon liveness, agent skill
-//! dirs, and version alignment (CLI vs plugin manifest vs skill payload).
+//! Checks: backend env (`HERDR_*`/`HC_TERMINAL_ID`), runtime connectivity
+//! (herdr socket `ping` or hc `terminal.list`), scope resolution, pool db
+//! migration state, router daemon liveness, agent skill dirs, and version
+//! alignment (CLI vs plugin manifest vs skill payload).
 //! Nothing is mutated; `--fix` is intentionally not implemented (MVP).
 
 use std::path::{Path, PathBuf};
@@ -86,18 +87,38 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, project: Option<&Path>) -> CmdResult<
         Err(err) => Check::new("env.pane", CheckStatus::Fail, err.to_string()),
     });
 
-    // -- socket --------------------------------------------------------------
-    match ctx.client.ping() {
-        Ok(pong) => checks.push(Check::new(
-            "socket.ping",
-            CheckStatus::Ok,
-            format!("version {} protocol {}", pong.version, pong.protocol),
-        )),
-        Err(err) => checks.push(Check::new(
-            "socket.ping",
-            CheckStatus::Fail,
-            format!("{} ({})", err, ctx.client.socket_path().display()),
-        )),
+    // -- backend ---------------------------------------------------------------
+    checks.push(Check::new(
+        "runtime.backend",
+        CheckStatus::Ok,
+        ctx.runtime_kind().as_str().to_string(),
+    ));
+    if let Some(client) = ctx.herdr_client() {
+        match client.ping() {
+            Ok(pong) => checks.push(Check::new(
+                "socket.ping",
+                CheckStatus::Ok,
+                format!("version {} protocol {}", pong.version, pong.protocol),
+            )),
+            Err(err) => checks.push(Check::new(
+                "socket.ping",
+                CheckStatus::Fail,
+                format!("{} ({})", err, client.socket_path().display()),
+            )),
+        }
+    } else {
+        match ctx.runtime().and_then(|runtime| {
+            runtime
+                .list_agents()
+                .map_err(|err| Failure::runtime(err.to_string()))
+        }) {
+            Ok(agents) => checks.push(Check::new(
+                "runtime.agents",
+                CheckStatus::Ok,
+                format!("{} agents", agents.len()),
+            )),
+            Err(err) => checks.push(Check::new("runtime.agents", CheckStatus::Fail, err.message)),
+        }
     }
 
     // -- identity + scope -----------------------------------------------------

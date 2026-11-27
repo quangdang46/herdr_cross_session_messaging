@@ -1,16 +1,16 @@
 //! Shared direct-delivery path for `send`/`reply`.
 //!
-//! The CLI attempts `agent.prompt` immediately after inserting the pending
-//! message. On success the message is `delivered`; on
-//! `agent_blocked`/`agent_not_ready`/transport failures it is marked
-//! `failed` with a `next_retry_at` so the router daemon's outbox worker
-//! retries it — the same failure policy the delivery worker uses
+//! The CLI attempts `AgentRuntime::send_prompt` immediately after
+//! inserting the pending message. On `Delivered` the message is
+//! `delivered`; on `Deferred`/`Failed`/transport errors it follows the
+//! same failure policy the delivery worker uses
 //! (`herdr_router::delivery`).
 
 use herdr_pool_core::PoolContext;
 use herdr_pool_store::{AgentRecord, Message};
 use herdr_router::delivery::{retry_delay, BLOCKED_BACKOFF, NOT_READY_BACKOFF};
 use herdr_router::envelope::message_envelope;
+use herdr_runtime::{DeferReason, SendOutcome};
 
 use crate::context::{delivery_target, now_millis, CmdResult, Ctx, Failure};
 
@@ -57,8 +57,9 @@ pub fn deliver(
     // daemon deliveries are byte-identical.
     let text = message_envelope(msg, Some(sender));
 
-    match ctx.client.agent_prompt(&target, &text, None) {
-        Ok(_) => {
+    let runtime = ctx.runtime()?;
+    match runtime.send_prompt(&target, &text) {
+        Ok(SendOutcome::Delivered { .. }) => {
             // The recipient may have consumed pending mail via `inbox`
             // while the prompt was in flight; `acknowledged` is already
             // terminal, so only a genuine transition failure is an error.
@@ -71,12 +72,27 @@ pub fn deliver(
             }
             tracing::info!(message = %msg.id, to = %msg.to_agent, "message delivered");
         }
-        Err(err) if err.is_agent_blocked() => {
+        Ok(SendOutcome::Deferred {
+            reason: DeferReason::Blocked,
+        }) => {
             // Agent alive but busy: defer without consuming an attempt —
             // same policy as the delivery worker.
             let next = now_millis() + BLOCKED_BACKOFF.as_millis() as i64;
             messages.defer(&msg.id, Some(next))?;
             tracing::debug!(message = %msg.id, "agent blocked; deferred");
+        }
+        Ok(SendOutcome::Deferred {
+            reason: DeferReason::NotReady,
+        }) => {
+            let next = now_millis() + NOT_READY_BACKOFF.as_millis() as i64;
+            messages.defer(&msg.id, Some(next))?;
+            tracing::debug!(message = %msg.id, "recipient not ready; deferred");
+        }
+        Ok(SendOutcome::Failed { kind, message }) => {
+            let delay = retry_delay(msg.attempt_count);
+            let next = now_millis() + delay.as_millis() as i64;
+            messages.record_failure(&msg.id, Some(next))?;
+            tracing::debug!(message = %msg.id, kind = ?kind, error = %message, "prompt failed; scheduled retry");
         }
         Err(err) => {
             let delay = retry_delay(msg.attempt_count);

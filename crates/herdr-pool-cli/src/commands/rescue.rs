@@ -10,7 +10,6 @@
 
 use herdr_plugin::paths::EnvLookup;
 use herdr_pool_store::HelperReport;
-use herdr_protocol::NotificationShowParams;
 
 use crate::cli::RescueAction;
 use crate::context::{open_identity_pool, resolve_identity, upsert_self, CmdResult, Ctx};
@@ -51,16 +50,17 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, id: &str, action: &RescueAction) -> C
 
     if matches!(action, RescueAction::NeedsHuman { .. }) {
         // Surface the escalation immediately instead of waiting for the
-        // daemon's next sweep (the job is already terminal).
-        let _ = ctx.client.notification_show(&NotificationShowParams {
-            title: "herdr-pool: rescue needs a human".to_string(),
-            body: Some(format!(
-                "{} for agent {} — please check the pane",
-                job.rescue_id, job.source_agent_id
-            )),
-            position: None,
-            sound: None,
-        });
+        // daemon's next sweep (the job is already terminal). hc has no
+        // toast surface; `notify` is a no-op there.
+        if let Ok(runtime) = ctx.runtime() {
+            let _ = runtime.notify(
+                "herdr-pool: rescue needs a human",
+                Some(&format!(
+                    "{} for agent {} — please check the pane",
+                    job.rescue_id, job.source_agent_id
+                )),
+            );
+        }
     }
 
     if ctx.json {
