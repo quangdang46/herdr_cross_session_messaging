@@ -14,20 +14,20 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/quangdang46/herdr_cross_session_messaging"
 
 [workspace.dependencies]
-herdr-protocol = { path = "crates/herdr-protocol", version = "0.1.0" }
+herdr-protocol = { path = "crates/herdr-protocol", version = "0.2.0" }
 herdr-testkit = { path = "crates/herdr-testkit" }
-herdr-pool-core = { path = "crates/herdr-pool-core", version = "0.1.0" }
-herdr-pool-store = { path = "crates/herdr-pool-store", version = "0.1.0" }
-herdr-plugin = { path = "crates/herdr-plugin", version = "0.1.0" }
-herdr-router = { path = "crates/herdr-router", version = "0.1.0" }
-herdr-runtime = { path = "crates/herdr-runtime", version = "0.1.0" }
+herdr-pool-core = { path = "crates/herdr-pool-core", version = "0.2.0" }
+herdr-pool-store = { path = "crates/herdr-pool-store", version = "0.2.0" }
+herdr-plugin = { path = "crates/herdr-plugin", version = "0.2.0" }
+herdr-router = { path = "crates/herdr-router", version = "0.2.0" }
+herdr-runtime = { path = "crates/herdr-runtime", version = "0.2.0" }
 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
