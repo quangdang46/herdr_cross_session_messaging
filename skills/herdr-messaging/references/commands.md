@@ -51,7 +51,8 @@ herdr-pool send <peer> <text> [--thread <THREAD_ID>] [--json]
 
 Send a message to one peer.
 
-- `<peer>`: `ag_*` pool id, pane/terminal id, or an unambiguous agent name.
+- `<peer>`: pane id (`w1:p2`, shown in the `PANE` column of `peers`),
+  `ag_*` pool id, terminal id, or an unambiguous agent name.
 - `<text>`: one argument; quote multi-word text.
 - `--thread <THREAD_ID>`: post into an existing `th_*` thread instead of
   starting a new one.
@@ -212,6 +213,11 @@ JSON: `{name, version, skill_version}`.
 
 ## Notes for agents
 
+- The router daemon periodically sends a `[herdr-pool] reminder` prompt to
+  agents whose delivered message has gone unanswered for ~10 minutes — a
+  gentle nudge to proactively continue the conversation, never a stored
+  pool message. Disable with `HERDR_POOL_NUDGE=0`; tune the threshold with
+  `HERDR_POOL_NUDGE_MINUTES`.
 - Prefer `--json` whenever you will parse output; the human format may change.
 - All commands are scope-local by construction; there is no flag to escape
   the project scope.

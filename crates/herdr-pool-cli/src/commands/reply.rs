@@ -12,8 +12,8 @@ use herdr_plugin::paths::EnvLookup;
 
 use crate::commands::deliver::deliver;
 use crate::context::{
-    ensure_daemon, open_identity_pool, refresh_registry, resolve_identity, upsert_self, CmdResult,
-    Ctx, Failure,
+    agent_handle, ensure_daemon, open_identity_pool, refresh_registry, resolve_identity,
+    upsert_self, CmdResult, Ctx, Failure,
 };
 use crate::output::{emit_json, MessageJson};
 use serde::Serialize;
@@ -87,10 +87,18 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, target: &str, text: &str) -> CmdResul
     if ctx.json {
         emit_json(&ReplyJson { message: out });
     } else {
+        let to_display = pool
+            .pool
+            .registry()
+            .get_agent(&delivered.to_agent)
+            .ok()
+            .flatten()
+            .map(|r| agent_handle(&r))
+            .unwrap_or_else(|| delivered.to_agent.clone());
         println!(
             "replied {} -> {} ({}): {}",
             out.id,
-            out.to_agent,
+            to_display,
             out.status,
             crate::output::snippet(&out.content, 60)
         );

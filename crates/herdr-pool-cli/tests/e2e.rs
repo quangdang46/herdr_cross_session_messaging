@@ -333,7 +333,8 @@ fn messaging_happy_path_two_agents_one_scope() {
     assert!(p1.contains(&msg_id));
     assert!(p1.contains(&thread_id));
     assert!(p1.contains("please review the diff"));
-    assert!(p1.contains(&format!("({id_a})")));
+    // Sender handle is the pane id (w1:p1), not the ag_* pool id.
+    assert!(p1.contains("(w1:p1)"), "{p1}");
     assert!(p1.contains(&format!("Reply: herdr-pool reply {msg_id}")));
 
     let p2 = prompts[1].params["text"].as_str().unwrap();

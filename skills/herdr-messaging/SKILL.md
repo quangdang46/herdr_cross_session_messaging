@@ -46,7 +46,9 @@ Follow this order; do not skip steps.
 1. `herdr-pool whoami` — learn your agent id, display name, and project scope.
    Note the result for the rest of the session.
 2. `herdr-pool peers` — list the other agents in your scope. Only these peers
-   are reachable; there is no cross-scope messaging.
+   are reachable; there is no cross-scope messaging. The `PANE` column shows
+   each peer's pane id (`w1:p2`) — the same handle you see in the Herdr UI —
+   which works directly as a `send` target.
 3. `herdr-pool inbox` — check for pending messages before sending or replying.
 4. `herdr-pool send <peer> <text>` — send a message to one peer. Prefer
    `--thread <id>` to group related messages, and record the returned message
@@ -55,6 +57,13 @@ Follow this order; do not skip steps.
 6. `herdr-pool broadcast <text>` — only when the user asks to notify ALL peers
    at once (e.g. "tell everyone you're done"); it sends one message per peer.
    Prefer `send`/`reply` for anything targeted.
+
+**Report back proactively.** When you finish work a peer asked you to do —
+or reach a point where they would want to know — send them a short status
+update via `send`/`reply` without waiting to be asked. If a peer's message
+has gone unanswered for a while, the pool may deliver a
+`[herdr-pool] reminder` prompt; treat it as a nudge to check whether the
+conversation still needs a reply from you.
 
 Use `herdr-pool threads` to review conversation history and
 `herdr-pool message read <id>` to mark a message as acknowledged. Add `--json`

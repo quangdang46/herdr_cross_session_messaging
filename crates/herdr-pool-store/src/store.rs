@@ -495,6 +495,35 @@ impl<'a> MessageStore<'a> {
         Ok(rows)
     }
 
+    /// Delivered mail that has gone unanswered past `cutoff_ms` (unix
+    /// millis, compared against `delivered_at`, falling back to
+    /// `created_at`).
+    ///
+    /// A message counts as answered when the *recipient* has posted any
+    /// later message in the same thread — i.e. the conversation moved on.
+    /// Powers the router's stale-thread nudge: agents that finish work but
+    /// forget to report back get a gentle reminder prompt.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
+    pub fn unanswered_delivered(&self, cutoff_ms: i64) -> Result<Vec<Message>> {
+        let conn = self.pool.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages m \
+             WHERE m.status = 'delivered' \
+               AND COALESCE(m.delivered_at, m.created_at) <= ?1 \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM messages r \
+                   WHERE r.thread_id IS m.thread_id \
+                     AND r.from_agent = m.to_agent \
+                     AND r.rowid > m.rowid \
+               ) \
+             ORDER BY COALESCE(m.delivered_at, m.created_at) ASC, m.id ASC"
+        ))?;
+        let rows = stmt
+            .query_map(params![cutoff_ms], message_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     // ----- status transitions ----------------------------------------------
 
     /// pending|failed -> delivered. Sets `delivered_at`.

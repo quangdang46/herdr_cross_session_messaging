@@ -199,7 +199,10 @@ fn send_delivers_envelope_and_marks_delivered() {
         text.starts_with("[herdr-pool] msg msg_"),
         "envelope prefix: {text}"
     );
-    assert!(text.contains(" from claude (ag_"), "sender label: {text}");
+    assert!(
+        text.contains(" from claude (w1:p1)"),
+        "sender label: {text}"
+    );
     assert!(text.contains(" thread th_"), "thread id: {text}");
     assert!(text.contains("please review"), "content: {text}");
     assert!(

@@ -14,8 +14,8 @@ use serde::Serialize;
 
 use crate::commands::deliver::deliver;
 use crate::context::{
-    ensure_daemon, open_identity_pool, refresh_registry, resolve_identity, resolve_peer,
-    upsert_self, CmdResult, Ctx,
+    agent_handle, ensure_daemon, open_identity_pool, refresh_registry, resolve_identity,
+    resolve_peer, upsert_self, CmdResult, Ctx,
 };
 use crate::output::{emit_json, MessageJson};
 
@@ -80,7 +80,7 @@ pub fn run(
         println!(
             "sent {} -> {} ({}): {}",
             out.id,
-            out.to_agent,
+            agent_handle(&recipient),
             out.status,
             crate::output::snippet(&out.content, 60)
         );
