@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::error::{HcError, Result};
+use super::error::{HcError, Result};
 
 /// Default per-request timeout.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -178,7 +178,16 @@ impl HcClient {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_string();
-            return Err(HcError::Api { code, message });
+            let kind = err
+                .get("data")
+                .and_then(|d| d.get("kind"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            return Err(HcError::Api {
+                code,
+                message,
+                kind,
+            });
         }
         Ok(frame.get("result").cloned().unwrap_or(Value::Null))
     }

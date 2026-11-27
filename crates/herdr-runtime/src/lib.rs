@@ -16,10 +16,12 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 pub mod error;
+pub mod hc;
 pub mod herdr;
 pub mod types;
 
 pub use error::RuntimeError;
+pub use hc::HcRuntime;
 pub use herdr::HerdrRuntime;
 pub use types::{
     AgentRuntime, DeferReason, EnvLookup, EventStream, RuntimeAgent, RuntimeCaps, RuntimeEvent,

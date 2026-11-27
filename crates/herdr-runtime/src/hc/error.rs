@@ -14,9 +14,16 @@ pub enum HcError {
     /// Malformed JSON-RPC frame from the core.
     #[error("protocol: {0}")]
     Protocol(String),
-    /// JSON-RPC error envelope returned by the core.
+    /// JSON-RPC error envelope returned by the core. `kind` is
+    /// `error.data.kind` when present (`not_found`, `blocked`,
+    /// `machine_unknown`, `finished`, `unavailable`, `status_mismatch`,
+    /// `invalid_params`, `config`, `needs_target`).
     #[error("hc api error {code}: {message}")]
-    Api { code: i64, message: String },
+    Api {
+        code: i64,
+        message: String,
+        kind: Option<String>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, HcError>;

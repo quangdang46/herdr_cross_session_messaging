@@ -47,6 +47,28 @@ impl RuntimeError {
     }
 }
 
+impl From<crate::hc::error::HcError> for RuntimeError {
+    fn from(err: crate::hc::error::HcError) -> Self {
+        use crate::hc::error::HcError;
+        match err {
+            HcError::Transport(e) => RuntimeError::Transport(e),
+            HcError::Closed => RuntimeError::Closed,
+            HcError::Timeout { .. } => RuntimeError::Timeout,
+            HcError::Protocol(msg) => RuntimeError::Protocol(msg),
+            // Prefer the machine-readable `data.kind` as the code so
+            // callers/tests can match on "blocked"/"not_found"/etc.
+            HcError::Api {
+                code,
+                message,
+                kind,
+            } => RuntimeError::Api {
+                code: kind.unwrap_or_else(|| code.to_string()),
+                message,
+            },
+        }
+    }
+}
+
 impl From<HerdrError> for RuntimeError {
     fn from(err: HerdrError) -> Self {
         match err {
