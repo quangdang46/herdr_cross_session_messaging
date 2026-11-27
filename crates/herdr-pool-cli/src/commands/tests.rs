@@ -421,6 +421,35 @@ fn reply_lands_in_same_thread_to_original_sender() {
 }
 
 #[test]
+fn reply_to_own_message_is_usage_error() {
+    let f = Fixture::new();
+    f.script_two_agents();
+    let ctx = f.ctx();
+
+    // Self sends an outbound message, then tries to reply to its own id.
+    let msg_id = with_env!(f, "w1:p1", |env| {
+        peers::run(&ctx, env)?;
+        let pool = open_pool(f.state.path(), f.project.path()).unwrap();
+        let self_id = self_agent_id(&pool);
+        let peer_id = peer_agent_id(&pool);
+        let msg = pool
+            .pool
+            .messages()
+            .send(&self_id, &peer_id, "my own outbound")
+            .unwrap();
+        Ok::<_, Failure>(msg.id)
+    })
+    .unwrap();
+
+    let err = with_env!(f, "w1:p1", |env| {
+        reply::run(&ctx, env, &msg_id, "replying to myself")
+    })
+    .unwrap_err();
+    assert_eq!(err.kind, "usage");
+    assert_eq!(err.code, 2);
+}
+
+#[test]
 fn threads_summarizes_conversations() {
     let f = Fixture::new();
     f.script_two_agents();

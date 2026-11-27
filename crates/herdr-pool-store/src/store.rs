@@ -325,6 +325,11 @@ impl<'a> MessageStore<'a> {
         let original = self
             .message(message_id)?
             .ok_or_else(|| StoreError::NotFound(format!("message '{message_id}'")))?;
+        if original.from_agent == from_agent {
+            return Err(StoreError::Invalid(format!(
+                "cannot reply to your own message '{message_id}'"
+            )));
+        }
         self.insert_message(
             original.thread_id.as_deref(),
             None,

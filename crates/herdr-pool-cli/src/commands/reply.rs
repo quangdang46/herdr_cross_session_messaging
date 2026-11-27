@@ -46,8 +46,8 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, target: &str, text: &str) -> CmdResul
         )
     } else if target.starts_with("msg_") {
         match messages.message(target)? {
-            Some(_) => (
-                messages.reply(target, &self_record.agent_id, text)?,
+            Some(original) => (
+                reply_to_message(&messages, &self_record.agent_id, &original, text)?,
                 Some(target.to_string()),
             ),
             None => {
@@ -59,9 +59,9 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, target: &str, text: &str) -> CmdResul
             reply_in_thread(&messages, &self_record.agent_id, target, text)?,
             None,
         )
-    } else if messages.message(target)?.is_some() {
+    } else if let Some(original) = messages.message(target)? {
         (
-            messages.reply(target, &self_record.agent_id, text)?,
+            reply_to_message(&messages, &self_record.agent_id, &original, text)?,
             Some(target.to_string()),
         )
     } else {
@@ -108,6 +108,23 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, target: &str, text: &str) -> CmdResul
 
 fn is_thread(messages: &herdr_pool_store::MessageStore<'_>, id: &str) -> CmdResult<bool> {
     Ok(messages.thread(id)?.is_some())
+}
+
+/// Reply to `original`'s sender; self-replies are a usage error so an agent
+/// can't leave itself an unread message.
+fn reply_to_message(
+    messages: &herdr_pool_store::MessageStore<'_>,
+    self_agent: &str,
+    original: &herdr_pool_store::Message,
+    text: &str,
+) -> CmdResult<herdr_pool_store::Message> {
+    if original.from_agent == self_agent {
+        return Err(Failure::usage(format!(
+            "cannot reply to your own message '{}'",
+            original.id
+        )));
+    }
+    Ok(messages.reply(&original.id, self_agent, text)?)
 }
 
 /// Post `kind="reply"` into thread `thread_id`, addressed to the most recent

@@ -324,6 +324,26 @@ fn send_in_thread_and_reply() {
     assert_eq!(threads[0].thread_id, t.thread_id);
 }
 
+#[test]
+fn reply_to_own_message_is_rejected() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("scope-selfreply", &dir);
+    let msgs = store.messages();
+
+    let m = msgs.send("ag_a", "ag_b", "outbound").expect("send");
+    assert!(matches!(
+        msgs.reply(&m.id, "ag_a", "replying to myself"),
+        Err(StoreError::Invalid(_))
+    ));
+    // The rejected reply left no trace in the thread.
+    assert_eq!(
+        msgs.thread_messages(m.thread_id.as_deref().unwrap())
+            .expect("h")
+            .len(),
+        1
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Inbox scoping
 // ---------------------------------------------------------------------------
