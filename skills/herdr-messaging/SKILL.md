@@ -1,8 +1,8 @@
 ---
 name: herdr-messaging
-description: Message peer coding agents running in the same Herdr project via the herdr-pool CLI. Use only when HERDR_ENV=1 and herdr-pool is on PATH and the task involves exchanging messages between Herdr agents (whoami, peers, inbox, send, reply, threads). Requires the herdr-cross-session-messaging plugin. Not for general Herdr pane control, agent prompting, or orchestration.
+description: Message peer coding agents running in the same project via the herdr-pool CLI. Use only inside a managed agent runtime — Herdr (HERDR_ENV=1) or hc/herdr-core (HC_TERMINAL_ID, with HERDR_POOL_RUNTIME=hc) — and herdr-pool on PATH, when the task involves exchanging messages between peer agents (whoami, peers, inbox, send, reply, threads). Requires the herdr-cross-session-messaging plugin. Not for general pane control, agent prompting, or orchestration.
 license: MIT OR Apache-2.0
-compatibility: Requires Herdr (HERDR_ENV=1 inside a managed pane) and the herdr-pool CLI on PATH.
+compatibility: Requires a managed agent runtime — Herdr (HERDR_ENV=1 inside a managed pane) or hc/herdr-core (HC_TERMINAL_ID inside a terminal) — and the herdr-pool CLI on PATH.
 metadata:
   author: herdr-cross-session-messaging
   version: 0.1.0
@@ -10,19 +10,26 @@ metadata:
 
 # Herdr Cross-Session Messaging
 
-You are running inside Herdr. Peer agents in the same project can exchange
-messages through `herdr-pool`, a CLI backed by a per-project message pool
-daemon (`herdr-routerd`).
+You are running inside a managed agent runtime (Herdr or hc). Peer agents
+in the same project can exchange messages through `herdr-pool`, a CLI
+backed by a per-project message pool daemon (`herdr-routerd`).
 
 ## Preconditions — check before anything else
 
-1. Confirm you are inside Herdr:
+1. Confirm you are inside a managed runtime. Two backends exist; the pool
+   auto-detects via `HERDR_POOL_RUNTIME` (default `herdr`):
 
    ```sh
+   # herdr backend (classic):
    test "${HERDR_ENV:-}" = "1"
+   # hc backend (hc/herdr-core terminals): HC_TERMINAL_ID is set instead.
+   # If you are in an hc terminal, prefix commands with HERDR_POOL_RUNTIME=hc
+   # (or export it) so the CLI selects the hc backend.
    ```
 
-   If this fails, STOP. This skill does not apply outside managed panes.
+   If neither holds, STOP. This skill does not apply outside managed
+   panes/terminals. On hc, peer `pane_id`s are terminal addresses (`t7`,
+   `machine/t7`) and peer rescue is unavailable (herdr-only feature).
 
 2. Confirm the CLI exists:
 
@@ -175,7 +182,8 @@ Real error strings come from the CLI; match on these, not on codes.
   different project scopes (or your own scope could not be resolved). Do not
   retry or work around it; explain to the user.
 - `missing env var: HERDR_*` / `HERDR_ENV` unset → you are not inside a
-  managed Herdr pane; stop and tell the user.
+  managed Herdr pane; on hc the equivalent is `HC_TERMINAL_ID` plus
+  `HERDR_POOL_RUNTIME=hc`. Stop and tell the user if neither applies.
 - Message stuck `pending`/`delivered` → the recipient is busy or blocked; the
   pool queues and retries via the router daemon. Do not spam sends; check
   `herdr-pool inbox` or `herdr-pool threads` at a later task boundary.

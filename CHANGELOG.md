@@ -9,6 +9,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Dual agent-runtime backends: new `herdr-runtime` crate defines the
+  `AgentRuntime` trait (discovery, `send_prompt` → `SendOutcome`,
+  `wait_agent`, `read_agent`/`send_keys`, `self_identity`,
+  `subscribe_events`) with `HerdrRuntime` (existing socket API) and
+  `HcRuntime` (hc/herdr-core JSON-RPC over `hc connect --json`:
+  `terminal.list/get/send/wait/read/keys`, `events.subscribe`, `t7` /
+  `machine/t7` addresses as pane-equivalent handles, `herdr-pool.*`
+  labels). `HERDR_POOL_RUNTIME=herdr|hc` (default `herdr`) selects the
+  backend for both `herdr-pool` and `herdr-routerd`; `HC_CONNECT_CMD`
+  overrides the connect argv (e.g. `ssh host hc connect`). The daemon
+  stamps `<state>/runtime` at startup and the CLI warns on mismatch.
+  hc semantics: blocked sends defer via a `terminal.get` pre-poll +
+  `blocked` error kind (no `agent_blocked`), finished terminals map to
+  offline, and rescue/pane auto-labeling remain herdr-only. E2E coverage
+  via `fake-hc.sh` in `crates/herdr-runtime/tests/` and
+  `crates/herdr-router/tests/hc_e2e.rs`.
 - Stale-thread reminders: the router daemon now scans each pool every 60s
   for `delivered` messages whose recipient has posted nothing newer in the
   same thread for `NUDGE_AFTER` (default 10 min) and sends the recipient a

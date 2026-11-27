@@ -337,6 +337,15 @@ in the pool.
   `<state>/logs/routerd.log` and recent lines.
 - **Daemon env**: `HERDR_POOL_NOTIFY_DELIVERY=1` toasts the user on every
   successful delivery (off by default — agents already get prompted).
+- **Runtime backend**: `HERDR_POOL_RUNTIME=herdr|hc` (default `herdr`)
+  selects which agent runtime `herdr-pool` and `herdr-routerd` talk to.
+  `herdr` is the classic Herdr socket API; `hc` targets an hc/herdr-core
+  terminal runtime over `hc connect --json` (terminal addresses like `t7`
+  or `machine/t7` act as pane-equivalent handles). `HC_CONNECT_CMD` overrides the connect argv
+  (e.g. `HC_CONNECT_CMD="ssh host hc connect"` for a remote core). CLI and
+  daemon must select the same backend within a scope — the daemon stamps
+  `<state>/runtime` at startup and the CLI warns on mismatch. On hc,
+  peer rescue and pane auto-labeling are disabled (herdr-only features).
 - **Config file**: `<config>/herdr-cross-session-messaging/config.toml`
   (`~/.config/…` by default; `HERDR_POOL_CONFIG_DIR` /
   `HERDR_PLUGIN_CONFIG_DIR` override the directory):
@@ -379,16 +388,24 @@ herdr-plugin.toml ──startup──▶ herdr-routerd ──events.subscribe─
   events. Targets are re-validated at send time — never cached blindly.
 - **Delivery**: `agent.prompt` with exponential backoff; `agent_blocked` keeps
   the message `pending` until the peer goes `idle`/`working`. Dead-letter after
-  max attempts.
+  max attempts. On the hc backend the same flow runs through
+  `terminal.get`+`terminal.send` (`status.state=blocked` defers instead of
+  `agent_blocked`).
+- **Dual runtime**: all components talk to the `AgentRuntime` trait
+  (`crates/herdr-runtime`), so the pool runs unchanged on Herdr or hc;
+  `HERDR_POOL_RUNTIME` picks the backend per process.
 - **Sync only**: `std::os::unix::net::UnixStream` + threads. One connection per
   request; only `events.subscribe`/`events.wait`/`agent.wait`/
   `agent.prompt`+wait/`pane.wait_for_output` hold a connection open.
 
 Workspace layout: `crates/herdr-protocol` (NDJSON client + types),
-`crates/herdr-pool-store` (SQLite pools/registry), `crates/herdr-pool-core`
+`crates/herdr-runtime` (`AgentRuntime` trait + herdr/hc backends +
+`HERDR_POOL_RUNTIME` selection), `crates/herdr-pool-store` (SQLite
+pools/registry), `crates/herdr-pool-core`
 (scope + registry logic), `crates/herdr-plugin` (manifest, skill installer,
 paths), `crates/herdr-router` (daemon loop + delivery + rescue),
 `crates/herdr-pool-cli` and `crates/herdr-routerd` (the two binaries),
+`crates/herdr-testkit` (`FakeHerdr` test server),
 `skills/herdr-messaging/` (agent skill payload).
 
 ## Troubleshooting

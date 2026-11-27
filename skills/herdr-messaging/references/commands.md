@@ -12,9 +12,17 @@ herdr-pool [--json] [--socket-path <PATH>] [--state-dir <DIR>] [-v|--verbose] <C
 ```
 
 - `--json` — machine-readable JSON output (stable schema per command).
-- `--socket-path <PATH>` — override `HERDR_SOCKET_PATH`.
+- `--socket-path <PATH>` — override `HERDR_SOCKET_PATH` (herdr backend
+  only; rejected when `HERDR_POOL_RUNTIME=hc`).
 - `--state-dir <DIR>` — override `HERDR_POOL_STATE_DIR` / XDG state dir.
 - `-v, --verbose` — debug-level logging on stderr.
+
+Backend selection (env, not flags): `HERDR_POOL_RUNTIME=herdr|hc` picks the
+agent runtime (default `herdr`); inside hc/herdr-core terminals set it to
+`hc` (identity comes from `HC_TERMINAL_ID`). `HC_CONNECT_CMD` overrides the
+`hc connect` argv (e.g. `ssh host hc connect`). CLI and the router daemon
+must agree on the backend — the daemon stamps `<state>/runtime` and the
+CLI warns on mismatch.
 
 Output contract: stdout = data, stderr = diagnostics, exit 0 = success,
 exit 1 = runtime failure, exit 2 = usage/precondition error.
