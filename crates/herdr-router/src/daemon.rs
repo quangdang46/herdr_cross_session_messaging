@@ -43,7 +43,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use herdr_plugin::paths::state_dir as plugin_state_dir;
 use herdr_protocol::HerdrClient;
-use herdr_runtime::{AgentRuntime, EventStream, HerdrRuntime, RuntimeError};
+use herdr_runtime::{connect_runtime, AgentRuntime, EventStream, RuntimeError, RuntimeKind};
 
 use crate::delivery::{DeliveryWorker, DEFAULT_POLL_INTERVAL};
 use crate::error::{Result, RouterError};
@@ -67,6 +67,9 @@ pub const EVENT_WAKEUP: Duration = Duration::from_secs(5);
 const MAX_PANE_EVICTIONS: usize = 8;
 /// pidfile name under the state dir.
 pub const PID_FILE_NAME: &str = "routerd.pid";
+/// Runtime-backend stamp written at daemon startup (`herdr`|`hc`) so the
+/// CLI can warn when `HERDR_POOL_RUNTIME` selections disagree.
+pub const RUNTIME_STAMP_FILE: &str = "runtime";
 /// instance-lock directory name under the state dir.
 pub const LOCK_DIR_NAME: &str = "routerd.lock";
 /// shutdown sentinel written by `herdr-routerd stop`.
@@ -95,6 +98,10 @@ pub struct DaemonConfig {
     /// Auto-send the `[herdr-pool] bootstrap` prompt to new agents
     /// (`[bootstrap] enabled` in config.toml / `HERDR_POOL_BOOTSTRAP`).
     pub bootstrap_enabled: bool,
+    /// Agent runtime backend (`HERDR_POOL_RUNTIME`, default `herdr`).
+    /// Both backends coexist during the hc migration; the CLI must select
+    /// the same value or delivery state can diverge.
+    pub runtime_kind: RuntimeKind,
 }
 
 impl DaemonConfig {
@@ -108,6 +115,7 @@ impl DaemonConfig {
             event_wakeup: EVENT_WAKEUP,
             notify_on_delivery: false,
             bootstrap_enabled: true,
+            runtime_kind: RuntimeKind::Herdr,
         }
     }
 
@@ -125,6 +133,8 @@ impl DaemonConfig {
             .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
             .unwrap_or(false);
         config.bootstrap_enabled = herdr_plugin::config::PoolConfig::load().bootstrap_enabled;
+        config.runtime_kind = herdr_runtime::runtime_kind_from_env(&|key| std::env::var_os(key))
+            .map_err(RouterError::Daemon)?;
         Ok(config)
     }
 }
@@ -165,12 +175,14 @@ impl DaemonHandle {
 /// scoped threads — used by `herdr-routerd run`).
 pub struct Daemon {
     config: DaemonConfig,
-    client: HerdrClient,
+    /// Raw herdr client — `Some` only on the herdr backend (rescue read
+    /// sources, dead-pane probes, `pane_get` escape hatches).
+    client: Option<HerdrClient>,
     /// Subscribe-stream client: same socket, bounded read timeout so the
     /// event loop wakes periodically for shutdown/reconcile checks.
-    event_client: HerdrClient,
-    /// Backend-agnostic runtime view (herdr backend today; the
-    /// `HERDR_POOL_RUNTIME` flag bead swaps the construction site).
+    /// `None` on hc (its event connection is owned by `HcRuntime`).
+    event_client: Option<HerdrClient>,
+    /// Backend-agnostic runtime view selected by `HERDR_POOL_RUNTIME`.
     runtime: Arc<dyn AgentRuntime>,
     pools: Arc<Pools>,
     shutdown: Arc<AtomicBool>,
@@ -178,21 +190,29 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// Build a daemon: resolve the socket path, open `Pools`.
+    /// Build a daemon: connect the configured runtime backend, open
+    /// `Pools`, and stamp `<state>/runtime` with the selected kind so the
+    /// CLI can detect `HERDR_POOL_RUNTIME` mismatches.
     pub fn new(config: DaemonConfig) -> Result<Self> {
         std::fs::create_dir_all(&config.state_dir)?;
         let pools = Arc::new(Pools::open(&config.state_dir)?);
-        let client = match &config.socket_path {
-            Some(path) => HerdrClient::from_socket_path(path),
-            None => HerdrClient::new()?,
+        let connected =
+            connect_runtime(config.runtime_kind, config.socket_path.as_deref(), &|key| {
+                std::env::var_os(key)
+            })?;
+        write_runtime_stamp(&config.state_dir, config.runtime_kind);
+        let (client, event_client) = match &connected.herdr_client {
+            Some(client) => (
+                Some(client.clone()),
+                Some(client.clone().with_request_timeout(config.event_wakeup)),
+            ),
+            None => (None, None),
         };
-        let event_client = client.clone().with_request_timeout(config.event_wakeup);
-        let runtime: Arc<dyn AgentRuntime> = Arc::new(HerdrRuntime::new(client.clone()));
         Ok(Self {
             config,
             client,
             event_client,
-            runtime,
+            runtime: connected.runtime,
             pools,
             shutdown: Arc::new(AtomicBool::new(false)),
             notify: Notify::default(),
@@ -248,12 +268,12 @@ impl Daemon {
         &self.pools
     }
 
-    /// The resolved Herdr client.
-    pub fn client(&self) -> &HerdrClient {
-        &self.client
+    /// The resolved Herdr client (`Some` only on the herdr backend).
+    pub fn client(&self) -> Option<&HerdrClient> {
+        self.client.as_ref()
     }
 
-    /// The backend-agnostic runtime (herdr backend today).
+    /// The backend-agnostic runtime selected by `HERDR_POOL_RUNTIME`.
     pub fn runtime(&self) -> &dyn AgentRuntime {
         self.runtime.as_ref()
     }
@@ -432,16 +452,20 @@ impl Daemon {
         if let Some(pane) = named {
             return vec![pane.clone()];
         }
-        watched
-            .iter()
-            .filter(|pane| {
-                matches!(
-                    self.event_client.pane_get(pane),
-                    Err(err) if err.is_pane_not_found()
-                )
-            })
-            .cloned()
-            .collect()
+        if let Some(event_client) = &self.event_client {
+            watched
+                .iter()
+                .filter(|pane| {
+                    matches!(
+                        event_client.pane_get(pane),
+                        Err(err) if err.is_pane_not_found()
+                    )
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        }
     }
 
     /// Delivery-worker thread: outbox sweeps until shutdown.
@@ -591,6 +615,22 @@ pub fn clear_stop_sentinel(state_dir: &Path) {
 /// Whether the stop sentinel exists.
 pub fn stop_requested(state_dir: &Path) -> bool {
     state_dir.join(SHUTDOWN_FILE_NAME).exists()
+}
+
+/// Record which runtime backend this daemon serves (`<state>/runtime`).
+/// Best-effort: a failed write only loses the CLI mismatch warning.
+pub fn write_runtime_stamp(state_dir: &Path, kind: RuntimeKind) {
+    if let Err(err) = std::fs::write(state_dir.join(RUNTIME_STAMP_FILE), kind.as_str()) {
+        tracing::debug!(error = %err, "runtime stamp write failed");
+    }
+}
+
+/// The backend the running daemon stamped, if any. `None` when no daemon
+/// has started since the stamp was introduced (or the file is unreadable).
+pub fn read_runtime_stamp(state_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(state_dir.join(RUNTIME_STAMP_FILE)).ok()?;
+    let kind = text.trim();
+    (!kind.is_empty()).then(|| kind.to_string())
 }
 
 /// Inspect daemon liveness: pidfile pid alive AND lock held by same pid.

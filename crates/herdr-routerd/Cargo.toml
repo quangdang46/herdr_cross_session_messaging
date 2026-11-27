@@ -19,7 +19,7 @@ path = "src/main.rs"
 [dependencies]
 herdr-router.workspace = true
 herdr-plugin.workspace = true
-herdr-protocol.workspace = true
+herdr-runtime.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true

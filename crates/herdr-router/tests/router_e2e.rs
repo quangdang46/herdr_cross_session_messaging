@@ -97,6 +97,7 @@ fn test_config(state_dir: &std::path::Path, socket: &std::path::Path) -> DaemonC
         event_wakeup: Duration::from_millis(200),
         notify_on_delivery: false,
         bootstrap_enabled: true,
+        runtime_kind: herdr_runtime::RuntimeKind::Herdr,
     }
 }
 
@@ -430,7 +431,7 @@ fn delivery_worker_blocked_backoff_is_recorded() {
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = DeliveryWorker::new(
         Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
-        client,
+        Some(client),
         pools,
         shutdown,
         Notify::default(),
@@ -489,7 +490,7 @@ fn delivery_worker_defers_not_ready_recipient_without_prompting() {
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = DeliveryWorker::new(
         Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
-        client,
+        Some(client),
         pools,
         shutdown,
         Notify::default(),
@@ -563,7 +564,7 @@ fn delivery_worker_blocked_creates_rescue_job_and_dispatches_helper() {
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = DeliveryWorker::new(
         Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
-        client,
+        Some(client),
         pools,
         shutdown,
         Notify::default(),
@@ -681,7 +682,7 @@ fn rescue_dispatches_multiple_blocked_agents_to_distinct_helpers() {
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = DeliveryWorker::new(
         Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
-        client,
+        Some(client),
         pools,
         shutdown,
         Notify::default(),
@@ -768,7 +769,7 @@ fn rescue_without_helper_stays_pending() {
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = DeliveryWorker::new(
         Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
-        client,
+        Some(client),
         pools,
         shutdown,
         Notify::default(),
@@ -846,7 +847,7 @@ fn rescue_ambiguous_dispatch_holds_assignment_then_redispatches_fresh_token() {
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = DeliveryWorker::new(
         Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
-        client,
+        Some(client),
         pools,
         shutdown,
         Notify::default(),
@@ -931,7 +932,7 @@ fn delivery_worker_notifies_on_delivery_when_enabled() {
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = DeliveryWorker::new(
         Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
-        client,
+        Some(client),
         pools,
         shutdown,
         Notify::default(),

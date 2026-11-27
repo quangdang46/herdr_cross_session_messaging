@@ -14,8 +14,11 @@
 //! State dir resolution is shared with the plugin: `HERDR_POOL_STATE_DIR`
 //! → XDG → `~/.local/state/herdr-cross-session-messaging` (see
 //! `herdr_plugin::paths::state_dir`). `HERDR_PLUGIN_STATE_DIR` is ignored so
-//! plugin and agent processes share one pool. The Herdr socket comes from the
-//! environment (`HERDR_SOCKET_PATH` / `HERDR_SESSION` / XDG config).
+//! plugin and agent processes share one pool. The agent runtime backend is
+//! selected by `HERDR_POOL_RUNTIME` (`herdr` default, `hc` opt-in — same
+//! flag the `herdr-pool` CLI reads); the Herdr socket comes from the
+//! environment (`HERDR_SOCKET_PATH` / `HERDR_SESSION` / XDG config) and the
+//! hc backend honors `HC_CONNECT_CMD`.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -27,18 +30,23 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use herdr_plugin::paths::state_dir as resolve_state_dir;
 use herdr_plugin::skill::{self, SkillScope};
-use herdr_protocol::HerdrClient;
 use herdr_router::{
     clear_stop_sentinel, daemon_status, pid_alive, read_pid_file, registry_sync::run_tick,
     remove_pid_file, sigterm, write_pid_file, write_stop_sentinel, Daemon, DaemonConfig,
     DaemonStatus, InstanceGuard, LOG_FILE_NAME,
 };
+use herdr_runtime::{connect_runtime, runtime_kind_from_env};
 
 #[derive(Parser)]
 #[command(
     name = "herdr-routerd",
     version,
-    about = "Router daemon for herdr-cross-session-messaging"
+    about = "Router daemon for herdr-cross-session-messaging",
+    after_help = "Environment:\n  \
+        HERDR_POOL_RUNTIME    agent backend: herdr (default) | hc\n  \
+        HERDR_POOL_STATE_DIR  state dir override\n  \
+        HERDR_SOCKET_PATH     Herdr socket path (herdr backend)\n  \
+        HC_CONNECT_CMD        hc connect argv override (hc backend)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -173,10 +181,17 @@ fn cmd_status() -> Result<()> {
 
 fn cmd_tick() -> Result<()> {
     let state_dir = state_dir()?;
-    let client = HerdrClient::new().context("resolve Herdr socket")?;
+    let env = |key: &str| std::env::var_os(key);
+    let kind = runtime_kind_from_env(&env).map_err(anyhow::Error::msg)?;
+    let connected = connect_runtime(kind, None, &env)?;
     let bootstrap_enabled = herdr_plugin::config::PoolConfig::load().bootstrap_enabled;
-    let synced = run_tick(&client, &state_dir, bootstrap_enabled)?;
-    println!("tick: synced {synced} agents");
+    let synced = run_tick(
+        connected.runtime.as_ref(),
+        connected.herdr_client.clone(),
+        &state_dir,
+        bootstrap_enabled,
+    )?;
+    println!("tick: synced {synced} agents (runtime: {})", kind.as_str());
     Ok(())
 }
 
@@ -224,9 +239,11 @@ fn cmd_run() -> Result<()> {
 
     ensure_skill_installed();
 
-    // from_env_at (not for_state_dir) so HERDR_POOL_NOTIFY_DELIVERY and the
-    // config.toml bootstrap toggle actually reach the running daemon.
+    // from_env_at (not for_state_dir) so HERDR_POOL_NOTIFY_DELIVERY,
+    // HERDR_POOL_RUNTIME, and the config.toml bootstrap toggle actually
+    // reach the running daemon.
     let config = DaemonConfig::from_env_at(state_dir.clone())?;
+    tracing::info!(runtime = %config.runtime_kind.as_str(), "routerd starting");
     let result = Daemon::new(config).and_then(|daemon| daemon.run());
     remove_pid_file(&state_dir);
     if let Err(err) = &result {

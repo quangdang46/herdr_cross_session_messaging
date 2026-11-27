@@ -35,10 +35,11 @@ pub mod registry_sync;
 pub mod rescue;
 
 pub use daemon::{
-    clear_stop_sentinel, daemon_status, pid_alive, read_pid_file, remove_pid_file, sigterm,
-    stop_requested, write_pid_file, write_stop_sentinel, Daemon, DaemonConfig, DaemonHandle,
-    DaemonStatus, InstanceGuard, EVENT_WAKEUP, LOCK_DIR_NAME, LOG_FILE_NAME, MAX_CONNECT_BACKOFF,
-    PID_FILE_NAME, RECONCILE_INTERVAL, SHUTDOWN_FILE_NAME,
+    clear_stop_sentinel, daemon_status, pid_alive, read_pid_file, read_runtime_stamp,
+    remove_pid_file, sigterm, stop_requested, write_pid_file, write_runtime_stamp,
+    write_stop_sentinel, Daemon, DaemonConfig, DaemonHandle, DaemonStatus, InstanceGuard,
+    EVENT_WAKEUP, LOCK_DIR_NAME, LOG_FILE_NAME, MAX_CONNECT_BACKOFF, PID_FILE_NAME,
+    RECONCILE_INTERVAL, RUNTIME_STAMP_FILE, SHUTDOWN_FILE_NAME,
 };
 pub use delivery::{
     retry_delay, retry_delay_jittered, DeliveryWorker, BACKOFF_BASE, BACKOFF_CAP, BLOCKED_BACKOFF,

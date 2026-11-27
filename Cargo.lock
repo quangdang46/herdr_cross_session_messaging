@@ -435,8 +435,8 @@ dependencies = [
  "anyhow",
  "clap",
  "herdr-plugin",
- "herdr-protocol",
  "herdr-router",
+ "herdr-runtime",
  "tracing",
  "tracing-subscriber",
 ]

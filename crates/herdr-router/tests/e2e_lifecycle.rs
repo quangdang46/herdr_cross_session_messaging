@@ -118,6 +118,7 @@ fn test_config(state_dir: &std::path::Path, socket: &std::path::Path) -> DaemonC
         event_wakeup: Duration::from_millis(200),
         notify_on_delivery: false,
         bootstrap_enabled: true,
+        runtime_kind: herdr_runtime::RuntimeKind::Herdr,
     }
 }
 
@@ -392,7 +393,7 @@ fn delivery_falls_back_to_current_pane_id() {
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker = DeliveryWorker::new(
         Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
-        client,
+        Some(client),
         Arc::clone(&pools),
         shutdown,
         Notify::default(),

@@ -18,11 +18,16 @@
 pub mod error;
 pub mod hc;
 pub mod herdr;
+pub mod select;
 pub mod types;
 
 pub use error::RuntimeError;
 pub use hc::HcRuntime;
 pub use herdr::HerdrRuntime;
+pub use select::{
+    connect_runtime, hc_connect_command, runtime_kind_from_env, ConnectedRuntime, RuntimeKind,
+    HC_CONNECT_CMD_ENV_VAR, RUNTIME_ENV_VAR,
+};
 pub use types::{
     AgentRuntime, DeferReason, EnvLookup, EventStream, RuntimeAgent, RuntimeCaps, RuntimeEvent,
     RuntimeStatus, SelfIdentity, SendFailureKind, SendOutcome, WaitEnd, WaitOutcome, WaitRequest,

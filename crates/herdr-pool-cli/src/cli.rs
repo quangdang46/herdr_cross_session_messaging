@@ -18,7 +18,9 @@ use clap::{Args, Parser, Subcommand};
     long_about = "Project-scoped peer messaging for agents running in Herdr panes.\n\
                   Messages are stored in per-project SQLite pools under the plugin\n\
                   state dir; delivery goes through `agent.prompt` with a\n\
-                  `[herdr-pool] msg ...` envelope the receiving agent understands."
+                  `[herdr-pool] msg ...` envelope the receiving agent understands.\n\n\
+                  Backend: HERDR_POOL_RUNTIME=herdr|hc (default herdr) selects the\n\
+                  agent runtime; the router daemon reads the same flag."
 )]
 pub struct Cli {
     #[command(flatten)]

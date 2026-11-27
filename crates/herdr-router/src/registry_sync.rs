@@ -680,24 +680,29 @@ impl<'a> RegistrySync<'a> {
 }
 
 /// One-shot reconcile used by `herdr-routerd tick` (plugin `[[events]]`
-/// hooks) — listing + registry sync + bootstrap attempts + rescue sweep,
-/// no daemon. The tick hook is herdr-specific, so the runtime is always
-/// [`HerdrRuntime`] here; `client` is also handed to [`RescueManager`]
-/// which still uses herdr-only read sources.
-pub fn run_tick(client: &HerdrClient, state_dir: &Path, bootstrap_enabled: bool) -> Result<usize> {
+/// hooks and manual diagnostics) — listing + registry sync + bootstrap
+/// attempts + rescue sweep, no daemon. `runtime` is the backend selected
+/// by `HERDR_POOL_RUNTIME`; `rescue_client` is the raw herdr client on the
+/// herdr backend (`None` on hc — [`RescueManager`] still uses herdr-only
+/// read sources the trait does not carry yet).
+pub fn run_tick(
+    runtime: &dyn AgentRuntime,
+    rescue_client: Option<HerdrClient>,
+    state_dir: &Path,
+    bootstrap_enabled: bool,
+) -> Result<usize> {
     let pools = Pools::open(state_dir)?;
-    let runtime = herdr_runtime::HerdrRuntime::new(client.clone());
-    let mut sync = RegistrySync::new(&runtime, &pools, bootstrap_enabled);
+    let mut sync = RegistrySync::new(runtime, &pools, bootstrap_enabled);
     let mut synced = sync.sync_snapshot()?;
     synced += sync.reconcile()?;
     sync.refresh_watched();
     // Rescue sweep: dispatch/monitor/expire jobs left over from before a
     // restart or accumulated while the daemon was down. Best-effort —
     // tick must not fail because a helper prompt was rejected.
-    if let Err(err) =
-        crate::rescue::RescueManager::new(client.clone(), Arc::new(pools)).sweep_once()
-    {
-        tracing::warn!(error = %err, "tick: rescue sweep failed");
+    if let Some(client) = rescue_client {
+        if let Err(err) = crate::rescue::RescueManager::new(client, Arc::new(pools)).sweep_once() {
+            tracing::warn!(error = %err, "tick: rescue sweep failed");
+        }
     }
     Ok(synced)
 }

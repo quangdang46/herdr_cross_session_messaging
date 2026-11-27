@@ -105,7 +105,9 @@ pub struct DeliveryWorker {
     /// Last rescue notice per recipient agent_id (throttle).
     last_blocked_notify: std::cell::RefCell<std::collections::HashMap<String, std::time::Instant>>,
     /// Peer TUI rescue coordinator (detection, dispatch, monitoring).
-    rescue: RescueManager,
+    /// `None` on non-herdr backends — rescue still uses herdr-only read
+    /// sources the trait does not carry yet.
+    rescue: Option<RescueManager>,
     /// Stale-thread reminder sweeper (unanswered delivered mail).
     nudge: NudgeManager,
     /// Toast the user on every successful delivery (`HERDR_POOL_NOTIFY_DELIVERY`).
@@ -116,17 +118,18 @@ impl DeliveryWorker {
     /// `runtime` serves prompts/reads/toasts; `rescue_client` stays a raw
     /// [`HerdrClient`] because [`RescueManager`] still uses Herdr-only
     /// read sources (`visible`, `recent-unwrapped`) the trait does not
-    /// carry yet.
+    /// carry yet. Pass `None` on non-herdr backends — rescue is disabled
+    /// (blocked mail still defers and retries normally).
     pub fn new(
         runtime: Arc<dyn AgentRuntime>,
-        rescue_client: HerdrClient,
+        rescue_client: Option<HerdrClient>,
         pools: Arc<Pools>,
         shutdown: Arc<std::sync::atomic::AtomicBool>,
         notify: Notify,
         poll_interval: Duration,
     ) -> Self {
         Self {
-            rescue: RescueManager::new(rescue_client, Arc::clone(&pools)),
+            rescue: rescue_client.map(|client| RescueManager::new(client, Arc::clone(&pools))),
             nudge: NudgeManager::new(Arc::clone(&runtime), Arc::clone(&pools)),
             runtime,
             pools,
@@ -140,16 +143,18 @@ impl DeliveryWorker {
     }
 
     /// Override the rescue job timeout / attempt cap / stale-assigned
-    /// threshold (tests).
+    /// threshold (tests). No-op when rescue is disabled (no herdr client).
     pub fn with_rescue_timeouts(
         mut self,
         job_timeout: Duration,
         max_attempts: u32,
         assigned_stale: Duration,
     ) -> Self {
-        self.rescue.set_job_timeout(job_timeout);
-        self.rescue.set_max_attempts(max_attempts);
-        self.rescue.set_assigned_stale(assigned_stale);
+        if let Some(rescue) = &mut self.rescue {
+            rescue.set_job_timeout(job_timeout);
+            rescue.set_max_attempts(max_attempts);
+            rescue.set_assigned_stale(assigned_stale);
+        }
         self
     }
 
@@ -169,8 +174,12 @@ impl DeliveryWorker {
 
     /// Run one rescue sweep (detect → expire → monitor → dispatch).
     /// Called by [`Self::run`] every poll; exposed for `tick` and tests.
+    /// No-op when the backend has no herdr client (rescue disabled).
     pub fn sweep_rescue(&self) -> Result<()> {
-        self.rescue.sweep_once()
+        match &self.rescue {
+            Some(rescue) => rescue.sweep_once(),
+            None => Ok(()),
+        }
     }
 
     /// Toast the user on each successful delivery (opt-in via env).
@@ -290,9 +299,12 @@ impl DeliveryWorker {
                 self.defer_retry(messages, msg, BLOCKED_BACKOFF)?;
                 self.maybe_rescue_blocked(&recipient, &target);
                 // Ensure a durable peer-rescue job exists; the rescue
-                // sweep dispatches it to an eligible helper.
-                if let Err(err) = self.rescue.ensure_job(pool, &recipient) {
-                    tracing::debug!(agent = %recipient.agent_id, error = %err, "rescue ensure_job failed");
+                // sweep dispatches it to an eligible helper. Skipped on
+                // backends without a herdr client (rescue disabled).
+                if let Some(rescue) = &self.rescue {
+                    if let Err(err) = rescue.ensure_job(pool, &recipient) {
+                        tracing::debug!(agent = %recipient.agent_id, error = %err, "rescue ensure_job failed");
+                    }
                 }
             }
             Ok(SendOutcome::Deferred {

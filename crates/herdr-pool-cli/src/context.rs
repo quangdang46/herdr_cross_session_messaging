@@ -125,29 +125,10 @@ impl From<herdr_plugin::PluginError> for Failure {
 /// Command result alias.
 pub type CmdResult<T> = Result<T, Failure>;
 
-/// Backend selected for this CLI invocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeKind {
-    /// Herdr socket API (`HERDR_*` pane env, `HERDR_PANE_ID` handles).
-    Herdr,
-    /// hc terminal runtime (`HC_TERMINAL_ID`, `t7`/`machine/t7` handles).
-    Hc,
-}
-
-impl RuntimeKind {
-    /// Stable name for env propagation and diagnostics.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Herdr => "herdr",
-            Self::Hc => "hc",
-        }
-    }
-}
-
-/// Env var selecting the agent runtime (`herdr` default, `hc` opt-in).
-pub const RUNTIME_ENV_VAR: &str = "HERDR_POOL_RUNTIME";
-/// Optional override for the `hc connect` argv (JSON-RPC over stdio).
-pub const HC_CONNECT_CMD_ENV_VAR: &str = "HC_CONNECT_CMD";
+/// Backend selected for this CLI invocation — shared with `herdr-routerd`
+/// via `herdr_runtime::select` so both sides parse `HERDR_POOL_RUNTIME`
+/// identically.
+pub use herdr_runtime::{RuntimeKind, RUNTIME_ENV_VAR};
 
 enum RuntimeFactory {
     Herdr(HerdrClient),
@@ -318,36 +299,17 @@ impl Ctx {
     }
 }
 
-fn env_value(env: &EnvLookup<'_>, key: &str) -> Option<OsString> {
-    env(key).filter(|value| !value.is_empty())
-}
-
 fn runtime_kind_from_env(env: &EnvLookup<'_>) -> CmdResult<RuntimeKind> {
-    let Some(value) = env_value(env, RUNTIME_ENV_VAR) else {
-        return Ok(RuntimeKind::Herdr);
-    };
-    let value = value.to_string_lossy();
-    if value.eq_ignore_ascii_case("herdr") {
-        Ok(RuntimeKind::Herdr)
-    } else if value.eq_ignore_ascii_case("hc") {
-        Ok(RuntimeKind::Hc)
-    } else {
-        Err(Failure::usage(format!(
-            "invalid {RUNTIME_ENV_VAR} '{value}' (expected herdr|hc)"
-        )))
-    }
+    herdr_runtime::runtime_kind_from_env(env).map_err(Failure::usage)
 }
 
 fn hc_factory(env: &EnvLookup<'_>) -> CmdResult<RuntimeFactory> {
-    if let Some(connect) = env_value(env, HC_CONNECT_CMD_ENV_VAR) {
-        return Ok(RuntimeFactory::Hc {
-            program: OsString::from("sh"),
-            args: vec![OsString::from("-c"), connect],
-        });
-    }
+    // Same argv `herdr_runtime::select::hc_connect_command` builds for the
+    // daemon; split back into program/args for the lazy factory.
+    let cmd = herdr_runtime::hc_connect_command(env);
     Ok(RuntimeFactory::Hc {
-        program: OsString::from("hc"),
-        args: vec![OsString::from("connect"), OsString::from("--json")],
+        program: cmd.get_program().to_os_string(),
+        args: cmd.get_args().map(|arg| arg.to_os_string()).collect(),
     })
 }
 
@@ -364,10 +326,30 @@ pub fn resolve_identity(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<SelfIdentit
 
 /// Open the pool for an already-resolved identity's scope.
 pub fn open_identity_pool(ctx: &Ctx, identity: &SelfIdentity) -> CmdResult<PoolContext> {
+    warn_on_runtime_mismatch(ctx);
     Ok(PoolContext::for_resolved(
         &ctx.state_dir,
         identity.scope.clone(),
     )?)
+}
+
+/// RFC `docs/hc-migration/00-rfc.md` §3: CLI and daemon must agree on the
+/// backend within a scope — a `send` on `hc` while the daemon drains on
+/// `herdr` would double-deliver. The daemon stamps `<state>/runtime` at
+/// startup; warn (not refuse) when this CLI selected a different backend.
+fn warn_on_runtime_mismatch(ctx: &Ctx) {
+    let Some(stamped) = herdr_router::read_runtime_stamp(&ctx.state_dir) else {
+        return;
+    };
+    let selected = ctx.runtime_kind().as_str();
+    if stamped != selected {
+        tracing::warn!(
+            daemon_runtime = %stamped,
+            cli_runtime = %selected,
+            "HERDR_POOL_RUNTIME mismatch: daemon serves a different backend; \
+             align the flag or mail may double-deliver"
+        );
+    }
 }
 
 /// Upsert *this* process into the pool registry and return its record.

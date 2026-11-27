@@ -17,7 +17,7 @@ use herdr_router::{daemon_status, DaemonStatus, LOG_FILE_NAME};
 use serde::Serialize;
 
 use crate::cli::DaemonAction;
-use crate::context::{routerd_bin, CmdResult, Ctx, Failure};
+use crate::context::{routerd_bin, CmdResult, Ctx, Failure, RUNTIME_ENV_VAR};
 use crate::output::emit_json;
 
 #[derive(Serialize)]
@@ -122,6 +122,10 @@ fn forward(ctx: &Ctx, action: &DaemonAction) -> CmdResult<()> {
     let mut cmd = std::process::Command::new(bin);
     cmd.arg(sub)
         .env("HERDR_POOL_STATE_DIR", &ctx.state_dir)
+        // Keep the daemon on the same backend this CLI selected — the
+        // env is inherited anyway, but export it explicitly like
+        // `ensure_daemon` does so the two can never drift.
+        .env(RUNTIME_ENV_VAR, ctx.runtime_kind().as_str())
         .stdin(Stdio::null());
     // `start` needs the same socket the CLI resolved: routerd reads
     // HERDR_SOCKET_PATH, so an explicit --socket-path must be exported.
