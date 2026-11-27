@@ -15,6 +15,9 @@ pub enum RouterError {
     /// Plugin failure.
     #[error("plugin: {0}")]
     Plugin(#[from] herdr_plugin::PluginError),
+    /// Runtime failure (agent runtime abstraction).
+    #[error("runtime: {0}")]
+    Runtime(#[from] herdr_runtime::RuntimeError),
     /// IO failure (state dir, pidfile, log file).
     #[error("io: {0}")]
     Io(#[from] std::io::Error),

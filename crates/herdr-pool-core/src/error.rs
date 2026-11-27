@@ -9,6 +9,9 @@ pub enum CoreError {
     /// Protocol failure.
     #[error("protocol: {0}")]
     Protocol(#[from] herdr_protocol::HerdrError),
+    /// Backend runtime failure (any [`herdr_runtime::AgentRuntime`]).
+    #[error("runtime: {0}")]
+    Runtime(#[from] herdr_runtime::RuntimeError),
     /// Required `HERDR_*` env var is absent or empty.
     #[error("missing env var: {0}")]
     MissingEnv(String),

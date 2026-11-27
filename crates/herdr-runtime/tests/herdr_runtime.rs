@@ -343,7 +343,7 @@ fn capabilities_report_herdr_features() {
 #[test]
 fn subscribe_events_returns_snapshot_then_normalized_events() {
     let (server, rt) = runtime();
-    let stream = rt.subscribe_events().unwrap();
+    let stream = rt.subscribe_events(&[]).unwrap();
     // Canned session.snapshot has zero agents.
     assert!(stream.snapshot.is_empty());
 
@@ -443,7 +443,7 @@ fn subscribe_events_snapshot_lists_agents() {
             }]
         }
     }));
-    let stream = rt.subscribe_events().unwrap();
+    let stream = rt.subscribe_events(&[]).unwrap();
     assert_eq!(stream.snapshot.len(), 1);
     assert_eq!(stream.snapshot[0].handle, "w1:p1");
     assert_eq!(stream.snapshot[0].name.as_deref(), Some("builder"));

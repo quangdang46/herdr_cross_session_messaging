@@ -1,48 +1,54 @@
-//! Registry synchronization: Herdr state → per-scope agent registries.
+//! Registry synchronization: runtime state → per-scope agent registries.
 //!
 //! [`RegistrySync`] is the single writer of registry state in the daemon.
 //! It is fed by two sources:
 //!
 //! * **Bootstrap** — [`RegistrySync::sync_snapshot`] walks
-//!   `session.snapshot().agents`, resolves each agent's project scope, and
+//!   `runtime.list_agents()`, resolves each agent's project scope, and
 //!   upserts an [`AgentRecord`] (reusing the stored `agent_id` keyed by
-//!   `terminal_id`). [`RegistrySync::reconcile`] does the same via
-//!   `agent.list` and additionally marks agents that vanished as offline.
-//! * **Events** — [`RegistrySync::handle_frame`] maps subscription frames
-//!   (`pane.agent_detected`, `pane.updated`, `pane.moved`, `pane.closed`,
-//!   `pane.exited`, `pane.created`, `workspace.closed`, `tab.closed`, and
-//!   per-pane `pane.agent_status_changed` subscription events) onto the
-//!   same upsert/offline/rekey operations.
+//!   `terminal_id`, then live handle). [`RegistrySync::reconcile`] does
+//!   the same listing and additionally marks agents that vanished as
+//!   offline.
+//! * **Events** — [`RegistrySync::handle_event`] maps normalized
+//!   [`RuntimeEvent`]s (`AgentSeen`, `AgentStatusChanged`, `AgentGone`,
+//!   `HandleRekeyed`, `TopologyChanged`) onto the same
+//!   upsert/offline/rekey/reconcile operations. Backend wire formats
+//!   never reach this module.
+//!
+//! `AgentRecord.pane_id` stores the backend-opaque runtime *handle*
+//! (`w1:p1` on herdr, `t7`/`machine/t7` on hc); `terminal_id` stays
+//! `Option` (hc has none).
 //!
 //! ## Bootstrap notifier
 //!
 //! [`Bootstrapper`] sends the one-shot `[herdr-pool] bootstrap` prompt the
 //! first time an agent needs it (`bootstrap_version < BOOTSTRAP_VERSION`).
-//! Failures (`agent_blocked`, `agent_not_ready`, transport) are retried on
-//! later sightings, capped at [`Bootstrapper::MAX_ATTEMPTS_PER_RUN`] prompt
-//! attempts per agent per daemon run — the skill files remain the durable
-//! channel. Success persists `bootstrap_version` in the agents table, so
-//! restarts and `tick` runs do not re-send.
+//! Failures (`Deferred`/`Failed` outcomes, transport) are retried on
+//! later sightings, capped at [`Bootstrapper::MAX_ATTEMPTS_PER_RUN`]
+//! prompt attempts per agent per daemon run — the skill files remain the
+//! durable channel. Success persists `bootstrap_version` in the agents
+//! table, so restarts and `tick` runs do not re-send.
 //!
-//! ## Watched-pane subscriptions
+//! ## Watched-handle status subscriptions
 //!
-//! `pane.agent_status_changed` subscriptions *require* a concrete
-//! `pane_id` server-side (verified against upstream `src/api/schema/events.rs`)
-//! — there is no global status subscription. [`RegistrySync::watched_panes`]
-//! therefore exposes the set of live agent pane ids; the event loop folds
-//! them into `events.subscribe` and reconnects when the set changes
-//! ([`RegistrySync::subscriptions_changed`]).
+//! Fine-grained status events need a concrete handle per subscription on
+//! herdr (`pane.agent_status_changed` has no global variant — the
+//! `AgentRuntime::subscribe_events` `watched` argument carries the set).
+//! [`RegistrySync::watched_panes`] exposes the live agent handles; the
+//! event loop folds them into `subscribe_events` and resubscribes when
+//! the set changes ([`RegistrySync::subscriptions_changed`]). On hc the
+//! parameter is ignored (the event feed is already global).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use herdr_pool_core::{resolve_scope_for_agent, ResolvedScope};
+use herdr_pool_core::{resolve_scope, ResolvedScope};
 use herdr_pool_store::{new_agent_id, AgentRecord, PoolStore, STATUS_OFFLINE};
-use herdr_protocol::{
-    AgentInfo, AgentStatus, EventData, HerdrClient, PaneInfo, SubscriptionEventData,
-    SubscriptionFrame,
+use herdr_protocol::HerdrClient;
+use herdr_runtime::{
+    AgentRuntime, RuntimeAgent, RuntimeError, RuntimeEvent, RuntimeStatus, SendOutcome,
 };
 
 use crate::envelope::{bootstrap_text, BOOTSTRAP_VERSION};
@@ -98,42 +104,42 @@ impl Notify {
     }
 }
 
-/// What a dispatched frame changed, for the event loop's bookkeeping.
+/// What a dispatched event changed, for the event loop's bookkeeping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncOutcome {
     /// Nothing the delivery worker or subscription set cares about.
     Quiet,
     /// Registry state changed; delivery should be nudged.
     RegistryChanged,
-    /// The watched-pane set may have changed; resubscribe.
+    /// The watched-handle set may have changed; resubscribe.
     Resubscribe,
 }
 
 /// Registry sync + bootstrap engine. Single-threaded by design: the daemon
 /// event loop owns the only instance.
 pub struct RegistrySync<'a> {
-    client: &'a HerdrClient,
+    runtime: &'a dyn AgentRuntime,
     pools: &'a Pools,
     bootstrap: Bootstrapper<'a>,
-    /// Pane ids currently covered by `pane.agent_status_changed`
-    /// subscriptions (rebuilt by [`Self::refresh_watched`]).
+    /// Handles currently covered by fine-grained status subscriptions
+    /// (rebuilt by [`Self::refresh_watched`]).
     watched: BTreeSet<String>,
     /// Set when `watched` differs from the last subscribed set.
     subs_dirty: bool,
     /// Whether any agent transitioned to a promptable state recently —
     /// surfaced so the event loop can nudge the delivery worker.
     delivery_nudge: bool,
-    /// Pane ids already checked for auto-labeling this run — bounds the
-    /// extra `pane.get` calls to once per pane per daemon run.
+    /// Handles already checked for auto-labeling this run — bounds the
+    /// extra `pane.get` calls to once per handle per daemon run.
     label_checked: HashSet<String>,
 }
 
 impl<'a> RegistrySync<'a> {
-    pub fn new(client: &'a HerdrClient, pools: &'a Pools, bootstrap_enabled: bool) -> Self {
+    pub fn new(runtime: &'a dyn AgentRuntime, pools: &'a Pools, bootstrap_enabled: bool) -> Self {
         Self {
-            client,
+            runtime,
             pools,
-            bootstrap: Bootstrapper::new(client, bootstrap_enabled),
+            bootstrap: Bootstrapper::new(runtime, bootstrap_enabled),
             watched: BTreeSet::new(),
             subs_dirty: false,
             delivery_nudge: false,
@@ -141,14 +147,14 @@ impl<'a> RegistrySync<'a> {
         }
     }
 
-    /// Pane ids the event loop should subscribe `pane.agent_status_changed`
+    /// Handles the event loop should request fine-grained status events
     /// for. Empty until the first [`Self::refresh_watched`].
     pub fn watched_panes(&self) -> &BTreeSet<String> {
         &self.watched
     }
 
-    /// True when the watched-pane set changed since the last check — the
-    /// event loop should tear down and re-issue `events.subscribe`.
+    /// True when the watched-handle set changed since the last check — the
+    /// event loop should tear down and re-issue `subscribe_events`.
     pub fn subscriptions_changed(&self) -> bool {
         self.subs_dirty
     }
@@ -164,7 +170,7 @@ impl<'a> RegistrySync<'a> {
         std::mem::take(&mut self.delivery_nudge)
     }
 
-    /// Rebuild the watched-pane set from every live registry record.
+    /// Rebuild the watched-handle set from every live registry record.
     /// Marks `subs_dirty` when the set actually changed.
     pub fn refresh_watched(&mut self) {
         let mut next = BTreeSet::new();
@@ -189,24 +195,32 @@ impl<'a> RegistrySync<'a> {
             tracing::debug!(
                 before = self.watched.len(),
                 after = next.len(),
-                "watched pane set changed; resubscribing"
+                "watched handle set changed; resubscribing"
             );
             self.watched = next;
             self.subs_dirty = true;
         }
     }
 
-    /// Full bootstrap pass: `session.snapshot` → upsert every reported agent.
+    /// Full bootstrap pass: `runtime.list_agents()` → upsert every reported
+    /// agent.
     ///
-    /// This is the daemon's Resync entry point and what `tick` runs.
+    /// This is the daemon's prime entry point and what `tick` runs.
     pub fn sync_snapshot(&mut self) -> Result<usize> {
-        let snapshot = self.client.session_snapshot()?;
+        let agents = self.runtime.list_agents()?;
+        self.sync_agents(&agents)
+    }
+
+    /// Upsert a batch of runtime agents (e.g. an [`EventStream`] snapshot)
+    /// and rebuild the watched set. Same path as [`Self::sync_snapshot`]
+    /// minus the listing call.
+    pub fn sync_agents(&mut self, agents: &[RuntimeAgent]) -> Result<usize> {
         let mut count = 0;
-        for agent in &snapshot.agents {
+        for agent in agents {
             match self.upsert_agent(agent) {
                 Ok(()) => count += 1,
                 Err(err) => {
-                    tracing::debug!(pane = %agent.pane_id, error = %err, "agent upsert skipped");
+                    tracing::debug!(handle = %agent.handle, error = %err, "agent upsert skipped");
                 }
             }
         }
@@ -214,39 +228,43 @@ impl<'a> RegistrySync<'a> {
         Ok(count)
     }
 
-    /// Safety reconcile: `agent.list` diff against every registry.
+    /// Safety reconcile: `runtime.list_agents()` diff against every
+    /// registry.
     ///
     /// Upserts every live agent (same path as snapshot) and marks registry
-    /// records whose terminal/pane no longer appears in `agent.list` as
+    /// records whose handle/terminal no longer appears in the listing as
     /// offline. Runs every [`crate::daemon::RECONCILE_INTERVAL`] and after
-    /// workspace/tab closes.
+    /// topology changes.
     pub fn reconcile(&mut self) -> Result<usize> {
-        let agents = self.client.agent_list()?;
+        let agents = self.runtime.list_agents()?;
+        let mut live_handles = std::collections::HashSet::new();
         let mut live_terminals = std::collections::HashSet::new();
-        let mut live_panes = std::collections::HashSet::new();
         let mut count = 0;
         for agent in &agents {
-            live_terminals.insert(agent.terminal_id.clone());
-            live_panes.insert(agent.pane_id.clone());
+            live_handles.insert(agent.handle.clone());
+            if let Some(t) = &agent.terminal_id {
+                live_terminals.insert(t.clone());
+            }
             match self.upsert_agent(agent) {
                 Ok(()) => count += 1,
                 Err(err) => {
-                    tracing::debug!(pane = %agent.pane_id, error = %err, "reconcile upsert skipped");
+                    tracing::debug!(handle = %agent.handle, error = %err, "reconcile upsert skipped");
                 }
             }
         }
-        self.mark_vanished_offline(&live_terminals, &live_panes);
+        self.mark_vanished_offline(&live_handles, &live_terminals);
         self.refresh_watched();
         Ok(count)
     }
 
-    /// Mark live records absent from `agent.list` offline. A record counts
-    /// as live when either its terminal id or current pane id still appears
-    /// (pane ids churn on `pane.move`; terminal ids are the stable anchor).
+    /// Mark live records absent from the agent listing offline. A record
+    /// counts as live when either its terminal id or current handle still
+    /// appears (handles churn on `pane.move`; terminal ids are the stable
+    /// anchor where the backend has them).
     fn mark_vanished_offline(
         &self,
+        live_handles: &std::collections::HashSet<String>,
         live_terminals: &std::collections::HashSet<String>,
-        live_panes: &std::collections::HashSet<String>,
     ) {
         for pool in self.pools.all() {
             let registry = pool.registry();
@@ -265,7 +283,7 @@ impl<'a> RegistrySync<'a> {
                     || record
                         .pane_id
                         .as_deref()
-                        .is_some_and(|p| live_panes.contains(p));
+                        .is_some_and(|p| live_handles.contains(p));
                 if !still_live {
                     if let Err(err) = registry.mark_offline(&record.agent_id) {
                         tracing::debug!(agent = %record.agent_id, error = %err, "mark_offline failed");
@@ -277,25 +295,41 @@ impl<'a> RegistrySync<'a> {
         }
     }
 
-    /// Dispatch one subscription frame. Returns the outcome for the event
-    /// loop (delivery nudge / resubscribe bookkeeping happens inside).
+    /// Dispatch one normalized runtime event. Returns the outcome for the
+    /// event loop (delivery nudge / resubscribe bookkeeping happens inside).
     ///
-    /// Any non-quiet outcome may have changed the watched-pane set, so
+    /// Any non-quiet outcome may have changed the watched-handle set, so
     /// [`Self::refresh_watched`] runs before returning — `subs_dirty` then
-    /// tells the event loop to re-issue `events.subscribe`.
-    pub fn handle_frame(&mut self, frame: &SubscriptionFrame) -> Result<SyncOutcome> {
-        let outcome = match frame {
-            SubscriptionFrame::Event(envelope) => {
-                self.handle_event(envelope.event, &envelope.data)?
+    /// tells the event loop to re-issue `subscribe_events`.
+    pub fn handle_event(&mut self, event: &RuntimeEvent) -> Result<SyncOutcome> {
+        let outcome = match event {
+            RuntimeEvent::AgentSeen { agent } => {
+                // Event payloads are hints, not authoritative records
+                // (e.g. herdr pane.created carries no readiness flags) —
+                // always refresh via `get_agent`, matching the old
+                // `agent.get`-per-event behavior. A `NotFound` means the
+                // handle is a plain shell or already gone.
+                self.refresh_agent_by_handle(&agent.handle)?;
+                SyncOutcome::RegistryChanged
             }
-            SubscriptionFrame::SubscriptionEvent(env) => {
-                if let SubscriptionEventData::PaneAgentStatusChanged(ev) = &env.data {
-                    self.handle_status_change(&ev.pane_id, ev.agent_status)?;
-                    SyncOutcome::RegistryChanged
-                } else {
-                    // output_matched / scroll_changed / unknown: not subscribed.
-                    SyncOutcome::Quiet
-                }
+            RuntimeEvent::AgentStatusChanged { handle, status } => {
+                self.handle_status_change(handle, *status)?;
+                SyncOutcome::RegistryChanged
+            }
+            RuntimeEvent::AgentGone { handle } => {
+                self.mark_offline_handle(handle);
+                SyncOutcome::Resubscribe
+            }
+            RuntimeEvent::HandleRekeyed { old, new } => {
+                self.handle_rekeyed(old, new)?;
+                SyncOutcome::Resubscribe
+            }
+            RuntimeEvent::TopologyChanged => {
+                // Cascading workspace/tab closes: the event does not
+                // itemize panes, so the authoritative listing diff is the
+                // only correct answer (same as the old reconcile path).
+                self.reconcile()?;
+                SyncOutcome::Resubscribe
             }
         };
         if outcome != SyncOutcome::Quiet {
@@ -304,131 +338,58 @@ impl<'a> RegistrySync<'a> {
         Ok(outcome)
     }
 
-    fn handle_event(
-        &mut self,
-        kind: herdr_protocol::EventKind,
-        data: &EventData,
-    ) -> Result<SyncOutcome> {
-        use herdr_protocol::EventKind as K;
-        match (kind, data) {
-            (
-                K::PaneAgentDetected,
-                EventData::PaneAgentDetected {
-                    pane_id, released, ..
-                },
-            ) => {
-                if *released {
-                    self.mark_offline_pane(pane_id);
-                    Ok(SyncOutcome::RegistryChanged)
-                } else {
-                    self.refresh_agent_by_pane(pane_id)?;
-                    Ok(SyncOutcome::RegistryChanged)
-                }
-            }
-            (K::PaneCreated, EventData::PaneCreated { pane })
-            | (K::PaneUpdated, EventData::PaneUpdated { pane }) => {
-                // PaneInfo may carry an agent; refresh via agent.get which
-                // resolves the authoritative AgentInfo (or 404s for shells).
-                self.refresh_agent_by_pane(&pane.pane_id)?;
-                Ok(SyncOutcome::RegistryChanged)
-            }
-            (
-                K::PaneAgentStatusChanged,
-                EventData::PaneAgentStatusChanged {
-                    pane_id,
-                    agent_status,
-                    ..
-                },
-            ) => {
-                // Lifecycle variant of the same signal (defensive: we do not
-                // subscribe to it, but a future server may push it anyway).
-                self.handle_status_change(pane_id, *agent_status)?;
-                Ok(SyncOutcome::RegistryChanged)
-            }
-            (
-                K::PaneMoved,
-                EventData::PaneMoved {
-                    pane,
-                    previous_pane_id,
-                    ..
-                },
-            ) => {
-                self.handle_pane_moved(previous_pane_id, pane)?;
-                Ok(SyncOutcome::Resubscribe)
-            }
-            (K::PaneClosed, EventData::PaneClosed { pane_id, .. })
-            | (K::PaneExited, EventData::PaneExited { pane_id, .. }) => {
-                self.mark_offline_pane(pane_id);
-                Ok(SyncOutcome::Resubscribe)
-            }
-            (K::WorkspaceClosed, EventData::WorkspaceClosed { .. })
-            | (K::TabClosed, EventData::TabClosed { .. }) => {
-                // Cascading closes are easiest to get right via the
-                // authoritative agent.list diff.
-                self.reconcile()?;
-                Ok(SyncOutcome::Resubscribe)
-            }
-            _ => Ok(SyncOutcome::Quiet),
-        }
-    }
-
-    /// `pane.moved`: keep `agent_id` stable across the pane-id change, then
-    /// refresh the record (the move may also carry a new cwd/scope).
-    fn handle_pane_moved(&mut self, previous_pane_id: &str, pane: &PaneInfo) -> Result<()> {
-        // Rekey every live record pointing at the old pane id (or at this
-        // terminal under a stale pane id) to the new pane id.
+    /// Handle re-keyed (herdr `pane.moved`; never fires on hc): keep
+    /// `agent_id` stable across the handle change, then refresh the record
+    /// (the move may also carry a new cwd/scope).
+    fn handle_rekeyed(&mut self, old_handle: &str, new_handle: &str) -> Result<()> {
+        // Rekey every live record pointing at the old handle.
         let mut rekeyed = Vec::new();
         for pool in self.pools.all() {
             let registry = pool.registry();
-            let mut candidates = registry.find_by_pane(previous_pane_id)?;
-            if let Some(existing) = registry.get_by_terminal(&pane.terminal_id)? {
-                if !candidates.iter().any(|c| c.agent_id == existing.agent_id) {
-                    candidates.push(existing);
-                }
-            }
-            for record in candidates {
+            for record in registry.find_by_pane(old_handle)? {
                 if record.status == STATUS_OFFLINE {
                     continue;
                 }
-                if record.pane_id.as_deref() == Some(pane.pane_id.as_str()) {
+                if record.pane_id.as_deref() == Some(new_handle) {
                     continue;
                 }
-                registry.rekey_pane(&record.agent_id, &pane.pane_id)?;
+                registry.rekey_pane(&record.agent_id, new_handle)?;
                 rekeyed.push(record.agent_id.clone());
             }
         }
         if !rekeyed.is_empty() {
             tracing::info!(
-                pane = %pane.pane_id,
-                previous = %previous_pane_id,
+                handle = %new_handle,
+                previous = %old_handle,
                 agents = ?rekeyed,
-                "pane moved; rekeyed registry records"
+                "handle rekeyed; updated registry records"
             );
         }
-        // Refresh authoritative state; a moved plain pane 404s and is a no-op.
-        self.refresh_agent_by_pane(&pane.pane_id)?;
-        Ok(())
+        // Refresh authoritative state; a moved plain pane 404s and is a
+        // no-op. The upsert re-anchors identity by `terminal_id`, covering
+        // records whose stored handle was already stale.
+        self.refresh_agent_by_handle(new_handle)
     }
 
-    /// Fetch `agent.get(pane_id)` and run the full upsert path. A
-    /// `agent_not_found` on a pane we track marks the record offline —
-    /// the agent was released or the pane became a plain shell.
-    fn refresh_agent_by_pane(&mut self, pane_id: &str) -> Result<()> {
-        match self.client.agent_get(pane_id) {
+    /// Fetch `runtime.get_agent(handle)` and run the full upsert path. A
+    /// `NotFound` on a handle we track marks the record offline — the
+    /// agent was released or the pane became a plain shell.
+    fn refresh_agent_by_handle(&mut self, handle: &str) -> Result<()> {
+        match self.runtime.get_agent(handle) {
             Ok(agent) => self.upsert_agent(&agent),
-            Err(err) if err.is_agent_not_found() => {
-                self.mark_offline_pane(pane_id);
+            Err(RuntimeError::NotFound { .. }) => {
+                self.mark_offline_handle(handle);
                 Ok(())
             }
             Err(err) => Err(err.into()),
         }
     }
 
-    /// Mark every live record bound to `pane_id` offline, across all pools.
-    fn mark_offline_pane(&self, pane_id: &str) {
+    /// Mark every live record bound to `handle` offline, across all pools.
+    fn mark_offline_handle(&self, handle: &str) {
         for pool in self.pools.all() {
             let registry = pool.registry();
-            let records = match registry.find_by_pane(pane_id) {
+            let records = match registry.find_by_pane(handle) {
                 Ok(r) => r,
                 Err(err) => {
                     tracing::debug!(scope = %pool.scope_key(), error = %err, "find_by_pane failed");
@@ -442,32 +403,33 @@ impl<'a> RegistrySync<'a> {
                 if let Err(err) = registry.mark_offline(&record.agent_id) {
                     tracing::debug!(agent = %record.agent_id, error = %err, "mark_offline failed");
                 } else {
-                    tracing::info!(agent = %record.agent_id, pane = %pane_id, "agent offline");
+                    tracing::info!(agent = %record.agent_id, handle = %handle, "agent offline");
                 }
             }
         }
     }
 
-    /// Evict a pane the server reported gone (`pane_not_found`): mark every
-    /// live record bound to it offline and rebuild the watched set so
-    /// `refresh_watched` cannot re-add it. The pane is also dropped from
-    /// `watched` unconditionally — a dead pane must never stay subscribed
-    /// even if the offline write failed.
+    /// Evict a handle the backend reported gone (`pane_not_found` on
+    /// subscribe): mark every live record bound to it offline and rebuild
+    /// the watched set so `refresh_watched` cannot re-add it. The handle
+    /// is also dropped from `watched` unconditionally — a dead handle
+    /// must never stay subscribed even if the offline write failed.
     pub fn evict_dead_pane(&mut self, pane_id: &str) {
-        self.mark_offline_pane(pane_id);
+        self.mark_offline_handle(pane_id);
         self.refresh_watched();
         self.watched.remove(pane_id);
-        tracing::info!(pane = %pane_id, "evicted dead watched pane");
+        tracing::info!(pane = %pane_id, "evicted dead watched handle");
     }
 
-    /// Update only the stored status for the live agent on `pane_id`.
-    /// Falls back to a full `agent.get` refresh when the pane is unknown —
-    /// a status change can be the first signal we see for a new agent.
-    fn handle_status_change(&mut self, pane_id: &str, status: AgentStatus) -> Result<()> {
+    /// Update only the stored status for the live agent on `handle`.
+    /// Falls back to a full `get_agent` refresh when the handle is
+    /// unknown — a status change can be the first signal we see for a
+    /// new agent.
+    fn handle_status_change(&mut self, handle: &str, status: RuntimeStatus) -> Result<()> {
         let mut found = false;
         for pool in self.pools.all() {
             let registry = pool.registry();
-            let records = registry.find_by_pane(pane_id)?;
+            let records = registry.find_by_pane(handle)?;
             for mut record in records {
                 if record.status == STATUS_OFFLINE {
                     continue;
@@ -486,22 +448,22 @@ impl<'a> RegistrySync<'a> {
                 }
                 tracing::debug!(
                     agent = %record.agent_id,
-                    pane = %pane_id,
+                    handle = %handle,
                     %previous,
                     %status,
                     "agent status updated"
                 );
-                if matches!(status, AgentStatus::Idle | AgentStatus::Working) {
+                if matches!(status, RuntimeStatus::Idle | RuntimeStatus::Working) {
                     self.delivery_nudge = true;
                     // A promptable transition is also the bootstrap retry
                     // point. Status events carry no readiness fields, so an
-                    // agent still flagged not-ready gets a fresh agent.get
+                    // agent still flagged not-ready gets a fresh get_agent
                     // — that is the only way to observe interactive_ready
                     // flipping true (e.g. `devin --resume` finishing).
                     let needs_bootstrap = record.bootstrap_version.unwrap_or(0) < BOOTSTRAP_VERSION;
                     let not_ready = !record.interactive_ready || record.launch_pending;
                     if needs_bootstrap && not_ready {
-                        self.refresh_agent_by_pane(pane_id)?;
+                        self.refresh_agent_by_handle(handle)?;
                     } else {
                         self.bootstrap.maybe_attempt(&pool, &record);
                     }
@@ -509,24 +471,24 @@ impl<'a> RegistrySync<'a> {
             }
         }
         if !found {
-            // Unknown pane: could be a brand-new agent whose detection event
-            // we missed — resolve it fully.
-            self.refresh_agent_by_pane(pane_id)?;
+            // Unknown handle: could be a brand-new agent whose detection
+            // event we missed — resolve it fully.
+            self.refresh_agent_by_handle(handle)?;
         }
         Ok(())
     }
 
-    /// Upsert one `AgentInfo`: resolve scope → open pool → merge with any
-    /// existing record (stable `agent_id` via `terminal_id`) → persist →
-    /// maybe bootstrap.
-    fn upsert_agent(&mut self, agent: &AgentInfo) -> Result<()> {
+    /// Upsert one [`RuntimeAgent`]: resolve scope → open pool → merge with
+    /// any existing record (stable `agent_id` via `terminal_id`, then live
+    /// handle) → persist → maybe bootstrap.
+    fn upsert_agent(&mut self, agent: &RuntimeAgent) -> Result<()> {
         let resolved = self.resolve_agent_scope(agent)?;
         let pool = self.pools.for_resolved(&resolved)?;
         let record = self.merge_record(&pool, agent, &resolved)?;
         self.retire_foreign_scope_records(agent, &pool);
         let registry = pool.registry();
         let previous = registry.get_agent(&record.agent_id)?;
-        let pane_changed = previous
+        let handle_changed = previous
             .as_ref()
             .and_then(|p| p.pane_id.as_deref())
             .is_some_and(|old| Some(old) != record.pane_id.as_deref());
@@ -543,7 +505,7 @@ impl<'a> RegistrySync<'a> {
         }
         self.delivery_nudge = true;
         self.bootstrap.maybe_attempt(&pool, &record);
-        if is_new || pane_changed {
+        if is_new || handle_changed {
             self.ensure_pane_label(agent, &record);
         }
         Ok(())
@@ -553,17 +515,21 @@ impl<'a> RegistrySync<'a> {
     /// label yet — never overwrites a user- or agent-set label, and only
     /// runs once per pane per daemon run ([`Self::label_checked`]).
     /// `HERDR_POOL_PANE_LABEL=0|false|no|off` disables this entirely.
-    fn ensure_pane_label(&mut self, agent: &AgentInfo, record: &AgentRecord) {
+    /// Herdr-only: skipped entirely on backends without `pane.rename`.
+    fn ensure_pane_label(&mut self, agent: &RuntimeAgent, record: &AgentRecord) {
         if !pane_label_enabled() {
             return;
         }
+        let Some(client) = self.runtime.herdr_client() else {
+            return;
+        };
         let Some(pane_id) = record.pane_id.clone().filter(|p| !p.is_empty()) else {
             return;
         };
         if !self.label_checked.insert(pane_id.clone()) {
             return;
         }
-        let pane = match self.client.pane_get(&pane_id) {
+        let pane = match client.pane_get(&pane_id) {
             Ok(pane) => pane,
             Err(err) => {
                 tracing::debug!(pane = %pane_id, error = %err, "pane.get for label check failed");
@@ -576,13 +542,12 @@ impl<'a> RegistrySync<'a> {
         let label = agent
             .name
             .clone()
-            .or_else(|| agent.display_agent.clone())
-            .or_else(|| agent.agent.clone())
+            .or_else(|| agent.kind.clone())
             .filter(|l| !l.trim().is_empty());
         let Some(label) = label else {
             return;
         };
-        match self.client.pane_rename(&pane_id, Some(&label)) {
+        match client.pane_rename(&pane_id, Some(&label)) {
             Ok(_) => {
                 tracing::info!(pane = %pane_id, label = %label, "pane auto-labeled");
             }
@@ -593,23 +558,35 @@ impl<'a> RegistrySync<'a> {
     }
 
     /// An agent belongs to exactly one scope. When its resolved scope
-    /// differs from where its `terminal_id` was previously registered
-    /// (launch cwd changed, terminal reused by another project), retire
-    /// those records — otherwise the agent stays a live ghost peer in the
-    /// old scope forever (`mark_vanished_offline` diffs against the
-    /// *global* live set, which still contains this terminal).
-    fn retire_foreign_scope_records(&self, agent: &AgentInfo, pool: &Arc<PoolStore>) {
+    /// differs from where it was previously registered (launch cwd
+    /// changed, terminal reused by another project), retire those records
+    /// — otherwise the agent stays a live ghost peer in the old scope
+    /// forever (`mark_vanished_offline` diffs against the *global* live
+    /// set, which still contains this agent).
+    fn retire_foreign_scope_records(&self, agent: &RuntimeAgent, pool: &Arc<PoolStore>) {
         for other in self.pools.all() {
             if other.scope_key() == pool.scope_key() {
                 continue;
             }
             let registry = other.registry();
-            let records = match registry.find_by_terminal(&agent.terminal_id) {
-                Ok(r) => r,
-                Err(err) => {
-                    tracing::debug!(scope = %other.scope_key(), error = %err, "find_by_terminal failed");
-                    continue;
-                }
+            // Terminal id is the stable cross-scope anchor where the
+            // backend has one; the handle is the fallback (hc addresses
+            // are stable for the terminal's lifetime).
+            let records = match agent.terminal_id.as_deref() {
+                Some(terminal_id) => match registry.find_by_terminal(terminal_id) {
+                    Ok(r) => r,
+                    Err(err) => {
+                        tracing::debug!(scope = %other.scope_key(), error = %err, "find_by_terminal failed");
+                        continue;
+                    }
+                },
+                None => match registry.find_by_pane(&agent.handle) {
+                    Ok(r) => r,
+                    Err(err) => {
+                        tracing::debug!(scope = %other.scope_key(), error = %err, "find_by_pane failed");
+                        continue;
+                    }
+                },
             };
             for rec in records {
                 if rec.status == STATUS_OFFLINE {
@@ -629,44 +606,55 @@ impl<'a> RegistrySync<'a> {
         }
     }
 
-    /// Resolve an agent's project scope, falling back to
-    /// `pane.process_info` once when the record carries no cwd fields.
-    fn resolve_agent_scope(&self, agent: &AgentInfo) -> Result<ResolvedScope> {
-        match resolve_scope_for_agent(agent, None) {
+    /// Resolve an agent's project scope, falling back to the runtime's
+    /// foreground-process cwd table once when the record carries no cwd
+    /// fields (herdr `pane.process_info`; empty on flat backends).
+    fn resolve_agent_scope(&self, agent: &RuntimeAgent) -> Result<ResolvedScope> {
+        match resolve_scope(agent.cwd.as_deref(), agent.foreground_cwd.as_deref(), None) {
             Ok(scope) => Ok(scope),
             Err(core_err) => {
                 if !matches!(core_err, herdr_pool_core::CoreError::ScopeUnresolved(_)) {
                     return Err(core_err.into());
                 }
-                let process_info = self
-                    .client
-                    .pane_process_info(Some(agent.pane_id.as_str()))?;
-                resolve_scope_for_agent(agent, Some(&process_info)).map_err(Into::into)
+                // Process-info cwds are lower priority than the record
+                // fields — try each in reported order, first hit wins.
+                for cwd in self
+                    .runtime
+                    .process_info_cwds(&agent.handle)
+                    .unwrap_or_default()
+                {
+                    if let Ok(scope) = resolve_scope(Some(&cwd), None, None) {
+                        return Ok(scope);
+                    }
+                }
+                Err(core_err.into())
             }
         }
     }
 
     /// Build the `AgentRecord` for `agent`, preserving identity fields
     /// (`agent_id`, `first_seen_at`, `bootstrap_version`) from any existing
-    /// record matched by `terminal_id` (then live `pane_id`).
+    /// record matched by `terminal_id` (then live `handle`).
     fn merge_record(
         &self,
         pool: &Arc<PoolStore>,
-        agent: &AgentInfo,
+        agent: &RuntimeAgent,
         resolved: &ResolvedScope,
     ) -> Result<AgentRecord> {
         let registry = pool.registry();
         // Terminal match includes offline rows: a transient offline mark
         // (agent restart, resume handoff) must not mint a new agent_id.
-        let existing = registry
-            .get_by_terminal_any(&agent.terminal_id)?
-            .or_else(|| {
-                registry
-                    .find_by_pane(&agent.pane_id)
-                    .ok()?
-                    .into_iter()
-                    .find(|r| r.status != STATUS_OFFLINE)
-            });
+        let existing = match agent.terminal_id.as_deref() {
+            Some(terminal_id) => registry.get_by_terminal_any(terminal_id)?,
+            None => None,
+        }
+        .or_else(|| {
+            registry
+                .find_by_pane(&agent.handle)
+                .ok()?
+                .into_iter()
+                .find(|r| r.status != STATUS_OFFLINE)
+        });
 
         let now = now_millis();
         Ok(AgentRecord {
@@ -675,12 +663,12 @@ impl<'a> RegistrySync<'a> {
                 .map(|e| e.agent_id.clone())
                 .unwrap_or_else(new_agent_id),
             scope_key: resolved.scope_key.as_str().to_string(),
-            terminal_id: Some(agent.terminal_id.clone()),
-            pane_id: Some(agent.pane_id.clone()),
-            agent_kind: agent.agent.clone().or_else(|| agent.display_agent.clone()),
+            terminal_id: agent.terminal_id.clone(),
+            pane_id: Some(agent.handle.clone()),
+            agent_kind: agent.kind.clone(),
             name: agent.name.clone(),
             cwd: Some(resolved.canonical_path.to_string_lossy().into_owned()),
-            status: agent.agent_status.as_str().to_string(),
+            status: agent.status.as_str().to_string(),
             interactive_ready: agent.interactive_ready,
             launch_pending: agent.launch_pending,
             bootstrap_version: existing.as_ref().and_then(|e| e.bootstrap_version),
@@ -692,10 +680,14 @@ impl<'a> RegistrySync<'a> {
 }
 
 /// One-shot reconcile used by `herdr-routerd tick` (plugin `[[events]]`
-/// hooks) — snapshot + registry sync + bootstrap attempts, no daemon.
+/// hooks) — listing + registry sync + bootstrap attempts + rescue sweep,
+/// no daemon. The tick hook is herdr-specific, so the runtime is always
+/// [`HerdrRuntime`] here; `client` is also handed to [`RescueManager`]
+/// which still uses herdr-only read sources.
 pub fn run_tick(client: &HerdrClient, state_dir: &Path, bootstrap_enabled: bool) -> Result<usize> {
     let pools = Pools::open(state_dir)?;
-    let mut sync = RegistrySync::new(client, &pools, bootstrap_enabled);
+    let runtime = herdr_runtime::HerdrRuntime::new(client.clone());
+    let mut sync = RegistrySync::new(&runtime, &pools, bootstrap_enabled);
     let mut synced = sync.sync_snapshot()?;
     synced += sync.reconcile()?;
     sync.refresh_watched();
@@ -716,14 +708,14 @@ pub fn run_tick(client: &HerdrClient, state_dir: &Path, bootstrap_enabled: bool)
 
 /// Sends the one-shot bootstrap prompt to newly registered agents.
 ///
-/// Rate limiting: at most [`Self::MAX_ATTEMPTS_PER_RUN`] `agent.prompt`
-/// calls per agent per daemon run (tracked in memory; `bootstrap_version`
-/// in the DB is the durable record). `agent_blocked`/`agent_not_ready` and
-/// transient transport errors leave the agent eligible for the next
-/// sighting; after the cap the agent is silently skipped — the installed
-/// skill remains the fallback channel.
+/// Rate limiting: at most [`Self::MAX_ATTEMPTS_PER_RUN`] prompt
+/// attempts per agent per daemon run (tracked in memory;
+/// `bootstrap_version` in the DB is the durable record). `Deferred`
+/// outcomes (blocked / not-ready) and transient transport errors leave
+/// the agent eligible for the next sighting; after the cap the agent is
+/// silently skipped — the installed skill remains the fallback channel.
 pub struct Bootstrapper<'a> {
-    client: &'a HerdrClient,
+    runtime: &'a dyn AgentRuntime,
     /// `[bootstrap] enabled` / `HERDR_POOL_BOOTSTRAP` — when false the
     /// prompt is never sent (the installed skill remains the channel).
     enabled: bool,
@@ -735,9 +727,9 @@ impl<'a> Bootstrapper<'a> {
     /// Prompt attempts allowed per agent per daemon run.
     pub const MAX_ATTEMPTS_PER_RUN: u8 = 3;
 
-    fn new(client: &'a HerdrClient, enabled: bool) -> Self {
+    fn new(runtime: &'a dyn AgentRuntime, enabled: bool) -> Self {
         Self {
-            client,
+            runtime,
             enabled,
             attempts: HashMap::new(),
         }
@@ -748,11 +740,11 @@ impl<'a> Bootstrapper<'a> {
     /// Errors are logged and swallowed — bootstrap must never break the
     /// registry sync path.
     ///
-    /// Readiness gate: an agent Herdr reports as `!interactive_ready` or
-    /// `launch_pending` (still launching, or mid `--resume`) is skipped
-    /// *without* consuming an attempt — `agent.prompt` there could paste
-    /// the instruction into a half-restored TUI. The next AgentInfo
-    /// sighting (agent.get/list refresh, status change) re-evaluates.
+    /// Readiness gate: an agent the runtime reports as `!interactive_ready`
+    /// or `launch_pending` (still launching, or mid `--resume`) is skipped
+    /// *without* consuming an attempt — prompting there could paste the
+    /// instruction into a half-restored TUI. The next record sighting
+    /// (get_agent/list refresh, status change) re-evaluates.
     pub fn maybe_attempt(&mut self, pool: &Arc<PoolStore>, record: &AgentRecord) {
         if !self.enabled {
             return;
@@ -779,9 +771,8 @@ impl<'a> Bootstrapper<'a> {
         }
         self.attempts.insert(record.agent_id.clone(), used + 1);
 
-        // Same target policy as the delivery worker: `agent.prompt`
-        // rejects terminal_id (agent_not_found), so pane_id is preferred,
-        // then name, terminal_id last.
+        // Same target policy as the delivery worker: the runtime handle
+        // (stored in `pane_id`) is preferred, then name, then terminal id.
         let target = record
             .pane_id
             .clone()
@@ -793,8 +784,8 @@ impl<'a> Bootstrapper<'a> {
             return;
         };
 
-        match self.client.agent_prompt(&target, bootstrap_text(), None) {
-            Ok(_) => {
+        match self.runtime.send_prompt(&target, bootstrap_text()) {
+            Ok(SendOutcome::Delivered { .. }) => {
                 self.attempts.remove(&record.agent_id);
                 if let Err(err) = mark_bootstrapped(pool, record) {
                     tracing::warn!(agent = %record.agent_id, error = %err, "bootstrap_version persist failed");
@@ -802,7 +793,7 @@ impl<'a> Bootstrapper<'a> {
                     tracing::info!(agent = %record.agent_id, "bootstrap prompt delivered");
                 }
             }
-            Err(err) if err.is_agent_blocked() || err.is_agent_not_ready() => {
+            Ok(SendOutcome::Deferred { .. }) => {
                 // Rejected before anything was sent — do not burn the
                 // per-run budget, or an agent first seen while blocked
                 // would never get bootstrapped after it unblocks.
@@ -813,8 +804,15 @@ impl<'a> Bootstrapper<'a> {
                 }
                 tracing::debug!(
                     agent = %record.agent_id,
-                    error = %err,
                     "bootstrap prompt deferred (agent not promptable)"
+                );
+            }
+            Ok(SendOutcome::Failed { message, .. }) => {
+                tracing::debug!(
+                    agent = %record.agent_id,
+                    attempt = used + 1,
+                    error = %message,
+                    "bootstrap prompt deferred"
                 );
             }
             Err(err) => {

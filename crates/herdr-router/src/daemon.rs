@@ -42,11 +42,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use herdr_plugin::paths::state_dir as plugin_state_dir;
-use herdr_protocol::{HerdrClient, HerdrError, SubscriptionFrame, SubscriptionStream};
+use herdr_protocol::HerdrClient;
+use herdr_runtime::{AgentRuntime, EventStream, HerdrRuntime, RuntimeError};
 
 use crate::delivery::{DeliveryWorker, DEFAULT_POLL_INTERVAL};
 use crate::error::{Result, RouterError};
-use crate::events::subscriptions_for;
 use crate::pools::Pools;
 use crate::registry_sync::{Notify, RegistrySync};
 
@@ -169,6 +169,9 @@ pub struct Daemon {
     /// Subscribe-stream client: same socket, bounded read timeout so the
     /// event loop wakes periodically for shutdown/reconcile checks.
     event_client: HerdrClient,
+    /// Backend-agnostic runtime view (herdr backend today; the
+    /// `HERDR_POOL_RUNTIME` flag bead swaps the construction site).
+    runtime: Arc<dyn AgentRuntime>,
     pools: Arc<Pools>,
     shutdown: Arc<AtomicBool>,
     notify: Notify,
@@ -184,10 +187,12 @@ impl Daemon {
             None => HerdrClient::new()?,
         };
         let event_client = client.clone().with_request_timeout(config.event_wakeup);
+        let runtime: Arc<dyn AgentRuntime> = Arc::new(HerdrRuntime::new(client.clone()));
         Ok(Self {
             config,
             client,
             event_client,
+            runtime,
             pools,
             shutdown: Arc::new(AtomicBool::new(false)),
             notify: Notify::default(),
@@ -248,14 +253,19 @@ impl Daemon {
         &self.client
     }
 
+    /// The backend-agnostic runtime (herdr backend today).
+    pub fn runtime(&self) -> &dyn AgentRuntime {
+        self.runtime.as_ref()
+    }
+
     // ------------------------------------------------------------------
     // Threads
     // ------------------------------------------------------------------
 
-    /// Event-loop thread: snapshot → subscribe → dispatch → reconnect.
+    /// Event-loop thread: subscribe → dispatch → reconnect.
     fn event_loop(&self) {
         let mut sync = RegistrySync::new(
-            &self.event_client,
+            self.runtime.as_ref(),
             self.pools.as_ref(),
             self.config.bootstrap_enabled,
         );
@@ -293,102 +303,110 @@ impl Daemon {
         }
     }
 
-    /// One subscribe session: snapshot sync once, then subscribe → frame
-    /// loop. Re-subscribes in place when the watched-pane set changes
-    /// (no re-snapshot needed — the registry is already current).
+    /// One subscribe session: `subscribe_events` (snapshot + stream in
+    /// one call) → dispatch loop. Re-subscribes in place when the
+    /// watched-handle set changes (no re-snapshot needed — the registry
+    /// is already current).
     ///
-    /// * `Ok(SessionEnd::Resync)` — server closed the stream; caller
+    /// * `Ok(SessionEnd::Resync)` — the event stream ended; caller
     ///   re-enters [`Self::event_session`] which re-snapshots (events are
     ///   not replayable).
     /// * `Ok(SessionEnd::Shutdown)` — stop requested.
-    /// * `Err` — transport/protocol failure; caller backs off, then
+    /// * `Err` — subscribe/transport failure; caller backs off, then
     ///   re-enters (which re-snapshots).
     fn event_session(&self, sync: &mut RegistrySync<'_>) -> Result<SessionEnd> {
-        // Bootstrap/resync: refresh the whole registry from the snapshot
-        // before subscribing so no events are missed.
-        let synced = sync.sync_snapshot()?;
-        tracing::info!(agents = synced, "event loop: snapshot synced");
-        sync.acknowledge_subscriptions();
+        // Bootstrap/resync: the subscribe call carries the agent
+        // snapshot, synced before any streamed event is dispatched.
+        let mut stream = self.subscribe_runtime(sync)?;
+        tracing::info!("event loop: subscribed");
 
         let mut last_reconcile = Instant::now();
         loop {
             if self.should_stop() {
                 return Ok(SessionEnd::Shutdown);
             }
-            let mut stream = self.subscribe_events(sync)?;
-
-            loop {
-                if self.should_stop() {
-                    return Ok(SessionEnd::Shutdown);
+            match stream.events.recv_timeout(self.config.event_wakeup) {
+                Ok(event) => {
+                    if let Err(err) = sync.handle_event(&event) {
+                        tracing::warn!(error = %err, "event dispatch failed");
+                    }
+                    if sync.take_delivery_nudge() {
+                        self.notify.notify();
+                    }
+                    if sync.subscriptions_changed() {
+                        // Handle set changed: re-issue subscribe_events
+                        // with the new set — same session, no backoff.
+                        tracing::debug!("event loop: watched handles changed; resubscribing");
+                        stream = self.subscribe_runtime(sync)?;
+                    }
                 }
-                match stream.next_frame() {
-                    Ok(frame) => {
-                        self.dispatch_frame(sync, &frame);
-                        if sync.subscriptions_changed() {
-                            // Pane set changed: drop this stream and
-                            // re-issue events.subscribe with the new set —
-                            // same session, no re-snapshot.
-                            tracing::debug!("event loop: watched panes changed; resubscribing");
-                            break;
-                        }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Wakeup tick: reconcile timer + stop check.
+                    if self.should_stop() {
+                        return Ok(SessionEnd::Shutdown);
                     }
-                    Err(HerdrError::Closed) => {
-                        // Clean EOF: the server went away; resync.
-                        return Ok(SessionEnd::Resync);
-                    }
-                    Err(HerdrError::Transport(e))
-                        if matches!(
-                            e.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) =>
-                    {
-                        // Read-timeout wakeup: reconcile timer + stop check.
-                        if self.should_stop() {
-                            return Ok(SessionEnd::Shutdown);
+                    if last_reconcile.elapsed() >= self.config.reconcile_interval {
+                        match sync.reconcile() {
+                            Ok(n) => tracing::debug!(agents = n, "reconcile pass complete"),
+                            Err(err) => tracing::warn!(error = %err, "reconcile failed"),
                         }
-                        if last_reconcile.elapsed() >= self.config.reconcile_interval {
-                            match sync.reconcile() {
-                                Ok(n) => tracing::debug!(agents = n, "reconcile pass complete"),
-                                Err(err) => tracing::warn!(error = %err, "reconcile failed"),
-                            }
-                            last_reconcile = Instant::now();
-                        }
-                        continue;
+                        last_reconcile = Instant::now();
                     }
-                    Err(err) => return Err(err.into()),
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    // Stream thread ended (socket error/EOF): resync.
+                    return Ok(SessionEnd::Resync);
                 }
             }
         }
     }
 
-    /// `events.subscribe` with dead-pane eviction. When the server rejects
-    /// the subscription set with `pane_not_found` (a registry record still
-    /// points at a closed pane), the gone pane(s) are identified, their
-    /// records marked offline via [`RegistrySync::evict_dead_pane`], and
-    /// the subscribe retried in-session — no backoff, no re-snapshot.
-    /// Bounded by [`MAX_PANE_EVICTIONS`]; every other error propagates to
-    /// the caller's backoff unchanged.
-    fn subscribe_events(&self, sync: &mut RegistrySync<'_>) -> Result<SubscriptionStream> {
+    /// `runtime.subscribe_events` with dead-handle eviction. When the
+    /// backend rejects the watched set with `pane_not_found` (a registry
+    /// record still points at a closed pane), the gone handle(s) are
+    /// identified, their records marked offline via
+    /// [`RegistrySync::evict_dead_pane`], and the subscribe retried
+    /// in-session — no backoff, no re-snapshot. Bounded by
+    /// [`MAX_PANE_EVICTIONS`]; every other error propagates to the
+    /// caller's backoff unchanged.
+    fn subscribe_runtime(&self, sync: &mut RegistrySync<'_>) -> Result<EventStream> {
         for _ in 0..=MAX_PANE_EVICTIONS {
-            let subs = subscriptions_for(sync.watched_panes());
-            let sub_count = subs.len();
-            match self.event_client.events_subscribe(subs) {
-                Ok(stream) => {
-                    sync.acknowledge_subscriptions();
-                    tracing::debug!(count = sub_count, "event loop: subscribed");
-                    return Ok(stream);
-                }
-                Err(HerdrError::Api { code, message }) if code == "pane_not_found" => {
+            let watched: Vec<String> = sync.watched_panes().iter().cloned().collect();
+            let stream = match self.runtime.subscribe_events(&watched) {
+                Ok(stream) => stream,
+                Err(RuntimeError::Api { code, message }) if code == "pane_not_found" => {
                     let dead = self.dead_watched_panes(sync, &message);
                     if dead.is_empty() {
-                        return Err(HerdrError::Api { code, message }.into());
+                        return Err(RuntimeError::Api { code, message }.into());
                     }
                     for pane in dead {
                         sync.evict_dead_pane(&pane);
                     }
+                    continue;
                 }
                 Err(err) => return Err(err.into()),
+            };
+            // Fold the subscribe-time snapshot into the registry before
+            // any streamed event is dispatched.
+            let synced = sync.sync_agents(&stream.snapshot)?;
+            tracing::debug!(agents = synced, "event loop: snapshot synced");
+            if sync.subscriptions_changed() {
+                // The snapshot sync itself changed the watched set —
+                // drain events that arrived on this stale subscription,
+                // then resubscribe with the fresh set.
+                sync.acknowledge_subscriptions();
+                while let Ok(event) = stream.events.try_recv() {
+                    if let Err(err) = sync.handle_event(&event) {
+                        tracing::warn!(error = %err, "event dispatch failed");
+                    }
+                    if sync.take_delivery_nudge() {
+                        self.notify.notify();
+                    }
+                }
+                continue;
             }
+            sync.acknowledge_subscriptions();
+            return Ok(stream);
         }
         Err(RouterError::Daemon(
             "events.subscribe kept failing with pane_not_found".into(),
@@ -401,6 +419,9 @@ impl Daemon {
     /// names nothing we recognize, fall back to probing each watched pane
     /// with `pane.get` — only an explicit `pane_not_found` answer evicts,
     /// so transient errors never drop a live pane.
+    ///
+    /// Herdr-specific: only the herdr backend can produce
+    /// `pane_not_found` (hc ignores the watched set entirely).
     fn dead_watched_panes(&self, sync: &RegistrySync<'_>, message: &str) -> Vec<String> {
         let watched = sync.watched_panes();
         let named = watched.iter().find(|pane| {
@@ -423,23 +444,10 @@ impl Daemon {
             .collect()
     }
 
-    /// Route one frame through `RegistrySync` and nudge the delivery
-    /// worker when warranted.
-    fn dispatch_frame(&self, sync: &mut RegistrySync<'_>, frame: &SubscriptionFrame) {
-        let kind = frame_kind(frame);
-        let span = tracing::debug_span!("dispatch", frame = kind);
-        let _enter = span.enter();
-        if let Err(err) = sync.handle_frame(frame) {
-            tracing::warn!(error = %err, "frame dispatch failed");
-        }
-        if sync.take_delivery_nudge() {
-            self.notify.notify();
-        }
-    }
-
     /// Delivery-worker thread: outbox sweeps until shutdown.
     fn delivery_loop(&self) {
         let worker = DeliveryWorker::new(
+            Arc::clone(&self.runtime),
             self.client.clone(),
             Arc::clone(&self.pools),
             Arc::clone(&self.shutdown),
@@ -466,20 +474,6 @@ enum SessionEnd {
     Shutdown,
     /// Server closed the stream — re-snapshot and resubscribe immediately.
     Resync,
-}
-
-fn frame_kind(frame: &SubscriptionFrame) -> &'static str {
-    match frame {
-        SubscriptionFrame::Event(env) => env.event.dot_name().unwrap_or("unknown"),
-        SubscriptionFrame::SubscriptionEvent(env) => match env.event {
-            herdr_protocol::SubscriptionEventKind::PaneOutputMatched => "pane.output_matched",
-            herdr_protocol::SubscriptionEventKind::PaneAgentStatusChanged => {
-                "pane.agent_status_changed"
-            }
-            herdr_protocol::SubscriptionEventKind::ScrollChanged => "pane.scroll_changed",
-            herdr_protocol::SubscriptionEventKind::Unknown => "subscription.unknown",
-        },
-    }
 }
 
 // ---------------------------------------------------------------------------

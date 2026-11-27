@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use herdr_pool_store::{AgentRecord, Message, STATUS_OFFLINE};
-use herdr_protocol::HerdrClient;
+use herdr_runtime::{AgentRuntime, SendOutcome};
 
 use crate::envelope::nudge_envelope;
 use crate::pools::Pools;
@@ -63,7 +63,7 @@ fn env_minutes(var: &str, default: Duration) -> Duration {
 /// Periodic unanswered-mail reminder sweeper. Single-threaded by design —
 /// owned by the delivery worker thread.
 pub struct NudgeManager {
-    client: HerdrClient,
+    runtime: Arc<dyn AgentRuntime>,
     pools: Arc<Pools>,
     enabled: bool,
     after: Duration,
@@ -75,9 +75,9 @@ pub struct NudgeManager {
 }
 
 impl NudgeManager {
-    pub fn new(client: HerdrClient, pools: Arc<Pools>) -> Self {
+    pub fn new(runtime: Arc<dyn AgentRuntime>, pools: Arc<Pools>) -> Self {
         Self {
-            client,
+            runtime,
             pools,
             enabled: !env_flag_disabled("HERDR_POOL_NUDGE"),
             after: env_minutes("HERDR_POOL_NUDGE_MINUTES", NUDGE_AFTER),
@@ -164,10 +164,10 @@ impl NudgeManager {
         let sender = registry.get_agent(&msg.from_agent).ok().flatten();
 
         match self
-            .client
-            .agent_prompt(&target, &nudge_envelope(msg, sender.as_ref()), None)
+            .runtime
+            .send_prompt(&target, &nudge_envelope(msg, sender.as_ref()))
         {
-            Ok(_) => {
+            Ok(SendOutcome::Delivered { .. }) => {
                 self.nudged.borrow_mut().insert(key, now);
                 tracing::info!(
                     message = %msg.id,
@@ -175,9 +175,12 @@ impl NudgeManager {
                     "sent unanswered-message reminder"
                 );
             }
-            Err(err) if err.is_agent_blocked() || err.is_agent_not_ready() => {
+            Ok(SendOutcome::Deferred { .. }) => {
                 // Busy or mid-launch: skip quietly; the next scan retries.
-                tracing::debug!(message = %msg.id, error = %err, "nudge deferred");
+                tracing::debug!(message = %msg.id, "nudge deferred");
+            }
+            Ok(SendOutcome::Failed { message, .. }) => {
+                tracing::debug!(message = %msg.id, error = %message, "nudge prompt failed");
             }
             Err(err) => {
                 tracing::debug!(message = %msg.id, error = %err, "nudge prompt failed");

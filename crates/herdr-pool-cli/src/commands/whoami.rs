@@ -12,9 +12,9 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<()> {
 
     let out = WhoamiJson {
         agent_id: record.agent_id.clone(),
-        pane_id: identity.env.pane_id.clone(),
-        workspace_id: identity.env.workspace_id.clone(),
-        tab_id: identity.env.tab_id.clone(),
+        pane_id: identity.env.handle.clone(),
+        workspace_id: identity.workspace.clone(),
+        tab_id: identity.tab.clone(),
         agent_kind: record.agent_kind.clone(),
         name: record.name.clone(),
         scope_key: pool.scope_key.as_str().to_string(),
@@ -27,8 +27,11 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<()> {
     } else {
         println!("agent_id:      {}", out.agent_id);
         println!("pane_id:       {}", out.pane_id);
-        println!("workspace_id:  {}", out.workspace_id);
-        println!("tab_id:        {}", out.tab_id);
+        println!(
+            "workspace_id:  {}",
+            out.workspace_id.as_deref().unwrap_or("-")
+        );
+        println!("tab_id:        {}", out.tab_id.as_deref().unwrap_or("-"));
         println!(
             "agent_kind:    {}",
             out.agent_kind.as_deref().unwrap_or("-")

@@ -77,8 +77,10 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, project: Option<&Path>) -> CmdResult<
             "env.pane",
             CheckStatus::Ok,
             format!(
-                "pane {} (workspace {}, tab {})",
-                ids.pane_id, ids.workspace_id, ids.tab_id
+                "handle {} (workspace {}, tab {})",
+                ids.handle,
+                ids.workspace_id.as_deref().unwrap_or("-"),
+                ids.tab_id.as_deref().unwrap_or("-")
             ),
         ),
         Err(err) => Check::new("env.pane", CheckStatus::Fail, err.to_string()),

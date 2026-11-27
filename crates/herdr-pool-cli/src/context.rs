@@ -8,11 +8,12 @@
 //!
 //! ## Project-path / scope resolution decision
 //!
-//! Scope always derives from the *pane's* launch cwd as reported by Herdr
-//! (`AgentInfo.cwd` → `PaneInfo.cwd` → `pane.process_info`), never from the
-//! CLI process's own cwd — a `herdr-pool` invocation inside a pane must land
-//! in the same pool as the agent that spawned it, even if the shell `cd`ed.
-//! Outside Herdr there is no agent identity, so pool commands fail with a
+//! Scope always derives from the *pane/terminal's* launch cwd as reported
+//! by the backend (`RuntimeAgent.cwd` → `foreground_cwd` → process-info
+//! fallback), never from the CLI process's own cwd — a `herdr-pool`
+//! invocation inside a pane must land in the same pool as the agent that
+//! spawned it, even if the shell `cd`ed. Outside a managed
+//! pane/terminal there is no agent identity, so pool commands fail with a
 //! clear `MissingEnv` error; `install`/`uninstall`/`doctor` accept
 //! `--project`/cwd for the cases that don't need an agent identity.
 
@@ -20,11 +21,10 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use herdr_plugin::paths::{self, EnvLookup};
-use herdr_pool_core::{
-    resolve_scope_for_agent, resolve_self, CoreError, PoolContext, ResolvedScope, SelfIdentity,
-};
-use herdr_pool_store::{new_agent_id, AgentRecord, STATUS_OFFLINE};
-use herdr_protocol::{AgentInfo, HerdrClient};
+use herdr_pool_core::{CoreError, PoolContext, SelfIdentity};
+use herdr_pool_store::AgentRecord;
+use herdr_protocol::HerdrClient;
+use herdr_runtime::HerdrRuntime;
 
 use crate::cli::Globals;
 
@@ -70,8 +70,8 @@ impl Failure {
     fn from_core(err: CoreError) -> Self {
         match err {
             CoreError::MissingEnv(var) => Self::usage(format!(
-                "missing env var {var}: not running inside a Herdr pane \
-                 (HERDR_PANE_ID/WORKSPACE_ID/TAB_ID are injected by Herdr)"
+                "missing env var {var}: not running inside a managed pane \
+                 or terminal (HERDR_PANE_ID/WORKSPACE_ID/TAB_ID or HC_TERMINAL_ID)"
             )),
             CoreError::PeerNotFound(msg) | CoreError::PeerAmbiguous(msg) => {
                 Self::usage(format!("peer: {msg}"))
@@ -162,6 +162,14 @@ impl Ctx {
         })
     }
 
+    /// The backend runtime for this client. Pool-core identity/scope/
+    /// registry helpers take `&dyn AgentRuntime`; wrapping the concrete
+    /// `HerdrClient` here keeps herdr behavior identical until
+    /// `cli-context-port` swaps `Ctx` onto a runtime selection.
+    pub fn runtime(&self) -> HerdrRuntime {
+        HerdrRuntime::new(self.client.clone())
+    }
+
     /// Explicit constructor (unit tests).
     #[cfg(all(test, unix))]
     pub fn for_test(json: bool, client: HerdrClient, state_dir: PathBuf) -> Self {
@@ -179,10 +187,11 @@ impl Ctx {
 // Identity / scope / registry helpers shared by pool commands
 // ---------------------------------------------------------------------------
 
-/// Resolve this process's Herdr identity (env → pane.current → agent.get →
-/// scope). Fails with exit-code-2 `MissingEnv` outside Herdr.
+/// Resolve this process's backend identity (env → `AgentRuntime::
+/// get_pane`/`get_agent` → scope). Fails with exit-code-2 `MissingEnv`
+/// outside a managed pane/terminal.
 pub fn resolve_identity(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<SelfIdentity> {
-    Ok(resolve_self(&ctx.client, env)?)
+    Ok(herdr_pool_core::resolve_self(&ctx.runtime(), env)?)
 }
 
 /// Open the pool for an already-resolved identity's scope.
@@ -193,222 +202,19 @@ pub fn open_identity_pool(ctx: &Ctx, identity: &SelfIdentity) -> CmdResult<PoolC
     )?)
 }
 
-/// Resolve an `AgentInfo`'s scope, falling back to `pane.process_info` once
-/// when the record carries no cwd fields (mirrors the router's
-/// `resolve_agent_scope`). Returns [`CoreError`] so callers can distinguish
-/// [`CoreError::ScopeUnresolved`] (skip the agent) from real failures.
-pub fn scope_for_agent(ctx: &Ctx, agent: &AgentInfo) -> Result<ResolvedScope, CoreError> {
-    match resolve_scope_for_agent(agent, None) {
-        Ok(scope) => Ok(scope),
-        Err(CoreError::ScopeUnresolved(_)) => {
-            let process_info = ctx
-                .client
-                .pane_process_info(Some(&agent.pane_id))
-                .map_err(CoreError::Protocol)?;
-            resolve_scope_for_agent(agent, Some(&process_info))
-        }
-        Err(err) => Err(err),
-    }
-}
-
-/// Build (or merge into) the [`AgentRecord`] for an `AgentInfo`, preserving
-/// `agent_id`/`first_seen_at`/`bootstrap_version` from any existing record
-/// matched by `terminal_id` then live `pane_id`. Mirrors the router's
-/// `merge_record`; kept local because `herdr-router`'s copy is private.
-pub fn record_for_agent(
-    registry: &herdr_pool_store::RegistryStore<'_>,
-    agent: &AgentInfo,
-    resolved: &ResolvedScope,
-) -> AgentRecord {
-    let existing = registry
-        .get_by_terminal_any(&agent.terminal_id)
-        .ok()
-        .flatten()
-        .or_else(|| {
-            registry
-                .find_by_pane(&agent.pane_id)
-                .ok()?
-                .into_iter()
-                .find(|r| r.status != STATUS_OFFLINE)
-        });
-
-    let now = now_millis();
-    AgentRecord {
-        agent_id: existing
-            .as_ref()
-            .map(|e| e.agent_id.clone())
-            .unwrap_or_else(new_agent_id),
-        scope_key: resolved.scope_key.as_str().to_string(),
-        terminal_id: Some(agent.terminal_id.clone()),
-        pane_id: Some(agent.pane_id.clone()),
-        agent_kind: agent.agent.clone().or_else(|| agent.display_agent.clone()),
-        name: agent.name.clone(),
-        cwd: Some(resolved.canonical_path.to_string_lossy().into_owned()),
-        status: agent.agent_status.as_str().to_string(),
-        interactive_ready: agent.interactive_ready,
-        launch_pending: agent.launch_pending,
-        bootstrap_version: existing.as_ref().and_then(|e| e.bootstrap_version),
-        first_seen_at: existing.map(|e| e.first_seen_at).unwrap_or(now),
-        last_seen_at: now,
-        offline_at: None,
-    }
-}
-
 /// Upsert *this* process into the pool registry and return its record.
-///
-/// With an agent record (`agent.get` succeeded) the record mirrors
-/// [`record_for_agent`]; for plain shell panes (`agent: None`) a record is
-/// still created keyed by `terminal_id` so the pane is addressable.
+/// Delegates to [`herdr_pool_core::upsert_self`] — agent record when the
+/// self handle hosts one, pane/terminal record for plain shells.
 pub fn upsert_self(pool: &PoolContext, identity: &SelfIdentity) -> CmdResult<AgentRecord> {
-    let registry = pool.pool.registry();
-    let existing = match &identity.agent {
-        Some(agent) => registry
-            .get_by_terminal_any(&agent.terminal_id)
-            .ok()
-            .flatten()
-            .or_else(|| {
-                registry
-                    .find_by_pane(&agent.pane_id)
-                    .ok()?
-                    .into_iter()
-                    .find(|r| r.status != STATUS_OFFLINE)
-            }),
-        None => {
-            let pane = &identity.pane;
-            registry
-                .get_by_terminal_any(&pane.terminal_id)
-                .ok()
-                .flatten()
-                .or_else(|| {
-                    registry
-                        .find_by_pane(&pane.pane_id)
-                        .ok()?
-                        .into_iter()
-                        .find(|r| r.status != STATUS_OFFLINE)
-                })
-        }
-    };
-    let had_existing = existing.is_some();
-
-    let now = now_millis();
-    let record = match &identity.agent {
-        Some(agent) => AgentRecord {
-            agent_id: existing
-                .as_ref()
-                .map(|e| e.agent_id.clone())
-                .unwrap_or_else(new_agent_id),
-            scope_key: pool.scope_key.as_str().to_string(),
-            terminal_id: Some(agent.terminal_id.clone()),
-            pane_id: Some(agent.pane_id.clone()),
-            agent_kind: agent.agent.clone().or_else(|| agent.display_agent.clone()),
-            name: agent.name.clone(),
-            cwd: Some(pool.canonical_path.to_string_lossy().into_owned()),
-            status: agent.agent_status.as_str().to_string(),
-            interactive_ready: agent.interactive_ready,
-            launch_pending: agent.launch_pending,
-            bootstrap_version: existing.as_ref().and_then(|e| e.bootstrap_version),
-            first_seen_at: existing.map(|e| e.first_seen_at).unwrap_or(now),
-            last_seen_at: now,
-            offline_at: None,
-        },
-        None => {
-            let pane = &identity.pane;
-            AgentRecord {
-                agent_id: existing
-                    .as_ref()
-                    .map(|e| e.agent_id.clone())
-                    .unwrap_or_else(new_agent_id),
-                scope_key: pool.scope_key.as_str().to_string(),
-                terminal_id: Some(pane.terminal_id.clone()),
-                pane_id: Some(pane.pane_id.clone()),
-                agent_kind: pane.display_agent.clone(),
-                name: pane.label.clone(),
-                cwd: Some(pool.canonical_path.to_string_lossy().into_owned()),
-                status: pane.agent_status.as_str().to_string(),
-                // Plain panes carry no agent readiness — preserve any
-                // stored values, defaulting to ready (no launch pending).
-                interactive_ready: existing
-                    .as_ref()
-                    .map(|e| e.interactive_ready)
-                    .unwrap_or(true),
-                launch_pending: existing.as_ref().map(|e| e.launch_pending).unwrap_or(false),
-                bootstrap_version: existing.as_ref().and_then(|e| e.bootstrap_version),
-                first_seen_at: existing.map(|e| e.first_seen_at).unwrap_or(now),
-                last_seen_at: now,
-                offline_at: None,
-            }
-        }
-    };
-
-    // Plugin surfaces (panel/popup) resolve identity through
-    // HERDR_PLUGIN_CONTEXT_JSON to the *focused* pane. When that pane
-    // hosts no agent and has no registry record yet, persisting one would
-    // mint a ghost peer — visible in `peers`/`broadcast` but never
-    // promptable. Skip the write; the returned record still gives callers
-    // a self id for this invocation. An existing record is refreshed
-    // as usual (the pane registered itself earlier), and a focused pane
-    // WITH an agent upserts the real agent's record — just `last_seen`.
-    let ghost = identity.env.from_plugin_context && identity.agent.is_none() && !had_existing;
-    if !ghost {
-        registry.upsert_agent(&record)?;
-    }
-    Ok(record)
+    Ok(herdr_pool_core::upsert_self(pool, identity)?)
 }
 
-/// Cheap registry reconcile: `agent.list` → upsert every agent whose scope
-/// matches this pool, then mark stored live *agent* records that vanished
-/// offline.
-///
-/// Records with `agent_kind: None` (plain shell panes registered via
-/// `whoami`) are never marked offline here — `agent.list` only reports
-/// detected agents; the router daemon owns authoritative offline marking.
-///
-/// Returns the number of agent records upserted.
+/// Cheap registry reconcile via `AgentRuntime::list_agents` → upsert
+/// every agent whose scope matches this pool, then mark stored live
+/// *agent* records that vanished offline. See
+/// [`herdr_pool_core::refresh_registry`].
 pub fn refresh_registry(ctx: &Ctx, pool: &PoolContext) -> CmdResult<usize> {
-    let agents = ctx.client.agent_list()?;
-    let registry = pool.pool.registry();
-    let mut synced = 0usize;
-    // (terminal_id, pane_id) pairs seen live in *this* scope.
-    let mut live_terms: Vec<String> = Vec::new();
-    let mut live_panes: Vec<String> = Vec::new();
-
-    for agent in &agents {
-        let scope = match scope_for_agent(ctx, agent) {
-            Ok(scope) => scope,
-            // Agent's cwd is gone/unresolvable — skip, don't fail the command.
-            Err(CoreError::ScopeUnresolved(_)) => continue,
-            Err(err) => return Err(err.into()),
-        };
-        if scope.scope_key != pool.scope_key {
-            continue; // never cross scopes
-        }
-        let record = record_for_agent(&registry, agent, &scope);
-        registry.upsert_agent(&record)?;
-        live_terms.push(agent.terminal_id.clone());
-        live_panes.push(agent.pane_id.clone());
-        synced += 1;
-    }
-
-    // Mark offline: stored live agent-kind records absent from agent.list.
-    for stored in registry.list_agents(false)? {
-        if stored.agent_kind.is_none() {
-            continue;
-        }
-        let term_live = stored
-            .terminal_id
-            .as_deref()
-            .is_some_and(|t| live_terms.iter().any(|x| x == t));
-        let pane_live = stored
-            .pane_id
-            .as_deref()
-            .is_some_and(|p| live_panes.iter().any(|x| x == p));
-        if !term_live && !pane_live {
-            if let Err(err) = registry.mark_offline(&stored.agent_id) {
-                tracing::debug!(agent = %stored.agent_id, error = %err, "mark_offline skipped");
-            }
-        }
-    }
-    Ok(synced)
+    Ok(herdr_pool_core::refresh_registry(&ctx.runtime(), pool)?)
 }
 
 /// Resolve a peer query (`ag_*` id, pane/terminal id, name) inside this
@@ -532,9 +338,9 @@ mod tests {
     use herdr_pool_core::ENV_PLUGIN_CONTEXT_JSON;
 
     use super::*;
-    use crate::testutil::{agent_value, pane_current_result, Fixture};
+    use crate::testutil::{agent_value, pane_get_result, Fixture};
 
-    /// Enough scripted `pane.current` responders for the socket calls one
+    /// Enough scripted `pane.get` responders for the socket calls one
     /// test makes (resolve_self calls it once per command under test).
     const PANE_DEPTH: usize = 8;
 
@@ -572,9 +378,9 @@ mod tests {
     }
 
     fn script_pane(f: &Fixture, pane: &str, term: &str, cwd: &str) {
-        let result = pane_current_result(pane, term, cwd);
+        let result = pane_get_result(pane, term, cwd);
         for _ in 0..PANE_DEPTH {
-            f.server.on("pane.current").respond(result.clone());
+            f.server.on("pane.get").respond(result.clone());
         }
     }
 
@@ -593,7 +399,7 @@ mod tests {
         let lookup = env_from_map(&env_map);
         let identity = resolve_identity(&ctx, &lookup).unwrap();
         assert!(identity.env.from_plugin_context);
-        assert_eq!(identity.env.pane_id, "w1:p9");
+        assert_eq!(identity.env.handle, "w1:p9");
 
         let pool = open_identity_pool(&ctx, &identity).unwrap();
         let record = upsert_self(&pool, &identity).unwrap();

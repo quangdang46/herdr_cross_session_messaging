@@ -1,49 +1,60 @@
 //! Self-identity resolution: which pane/agent/scope is *this* process?
 //!
-//! Herdr injects `HERDR_PANE_ID`, `HERDR_WORKSPACE_ID`, and `HERDR_TAB_ID`
-//! into agent/pane processes. [`self_env_from`] parses them (pure, unit
-//! testable); [`resolve_self`] then asks the Herdr socket for the pane and
-//! agent records and resolves the project scope — the same path the
-//! `herdr-pool whoami` command uses.
+//! Backends inject a pane-equivalent handle, never a directory: herdr
+//! sets `HERDR_PANE_ID`/`HERDR_WORKSPACE_ID`/`HERDR_TAB_ID` (plus
+//! `HERDR_PLUGIN_CONTEXT_JSON` on plugin surfaces); hc sets
+//! `HC_TERMINAL_ID` inside terminals. [`self_env_from`] parses them
+//! (pure, unit testable); [`resolve_self`] then queries the
+//! [`AgentRuntime`] for the pane/agent records and resolves the project
+//! scope — the same path the `herdr-pool whoami` command uses.
 //!
-//! These env vars identify the *pane*, never a directory: scope still comes
-//! exclusively from `cwd`/`foreground_cwd`/`process_info` per
-//! [`crate::scope`].
+//! These env vars identify the *handle*, not a directory: scope still
+//! comes exclusively from record `cwd`/`foreground_cwd` (plus backend
+//! process-info fallbacks) per [`crate::scope`].
 
 use std::path::PathBuf;
 
 use herdr_plugin::paths::EnvLookup;
-use herdr_protocol::{AgentInfo, HerdrClient, PaneInfo};
+use herdr_runtime::{AgentRuntime, RuntimeAgent, RuntimeError};
 
 use crate::error::{CoreError, Result};
-use crate::scope::{resolve_scope_for_agent, resolve_scope_for_pane, ResolvedScope};
+use crate::scope::{resolve_scope_for_runtime, ResolvedScope};
 
-/// Env var carrying the caller's pane id (`wN:pM`).
+/// Env var carrying the caller's pane id (`wN:pM`) — herdr backend.
 pub const ENV_PANE_ID: &str = "HERDR_PANE_ID";
-/// Env var carrying the caller's workspace id.
+/// Env var carrying the caller's workspace id — herdr backend.
 pub const ENV_WORKSPACE_ID: &str = "HERDR_WORKSPACE_ID";
-/// Env var carrying the caller's tab id.
+/// Env var carrying the caller's tab id — herdr backend.
 pub const ENV_TAB_ID: &str = "HERDR_TAB_ID";
 /// Env var carrying the plugin invocation context JSON. Plugin panes and
 /// popups get BOTH their own `HERDR_PANE_ID` (the plugin surface's pane,
 /// which is never a messaging identity) AND this JSON, whose
 /// `focused_pane_id` names the underlying tiled agent pane.
 pub const ENV_PLUGIN_CONTEXT_JSON: &str = "HERDR_PLUGIN_CONTEXT_JSON";
+/// Env var carrying the caller's terminal address (`t7`, or
+/// `machine/t7` for remote cores) — hc backend. hc has no workspace/tab
+/// concept, so it is the only identity var that backend injects.
+pub const ENV_HC_TERMINAL_ID: &str = "HC_TERMINAL_ID";
 
-/// Pane identity parsed from the Herdr-injected environment.
+/// Pane-equivalent identity parsed from the backend-injected environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfEnv {
-    pub pane_id: String,
-    pub workspace_id: String,
-    pub tab_id: String,
+    /// Runtime handle of self: `wN:pM` on herdr, `t7`/`machine/t7` on hc.
+    pub handle: String,
+    /// Workspace hint — `Some` on herdr, `None` on hc (no workspaces).
+    pub workspace_id: Option<String>,
+    /// Tab hint — `Some` on herdr, `None` on hc (no tabs).
+    pub tab_id: Option<String>,
     /// True when the ids came from `HERDR_PLUGIN_CONTEXT_JSON` (a plugin
     /// pane/popup) rather than the direct `HERDR_*_ID` vars.
     pub from_plugin_context: bool,
 }
 
-/// Parse the `HERDR_*` identity vars. All three must be present and
-/// non-empty; a missing var yields [`CoreError::MissingEnv`] — the process
-/// is not running inside a Herdr pane.
+/// Parse the backend identity vars. The herdr triple
+/// (`HERDR_PANE_ID`/`HERDR_WORKSPACE_ID`/`HERDR_TAB_ID`) or the hc
+/// `HC_TERMINAL_ID` must be present and non-empty; neither yields
+/// [`CoreError::MissingEnv`] — the process is not running inside a
+/// managed pane/terminal.
 ///
 /// Plugin panes (including popups) are the exception: they get their own
 /// `HERDR_*_ID` vars AND `HERDR_PLUGIN_CONTEXT_JSON`, whose
@@ -51,6 +62,10 @@ pub struct SelfEnv {
 /// context therefore wins over the direct vars — the plugin pane's own id
 /// is never the messaging identity. When the context is missing or
 /// malformed, the direct vars are used instead.
+///
+/// When both backends' vars are present the herdr triple wins (a process
+/// inside Herdr is authoritative); a partial herdr triple falls through
+/// to `HC_TERMINAL_ID` before erroring.
 pub fn self_env_from(env: &EnvLookup<'_>) -> Result<SelfEnv> {
     let mut context_err = None;
     if let Some(context) = env(ENV_PLUGIN_CONTEXT_JSON)
@@ -68,9 +83,21 @@ pub fn self_env_from(env: &EnvLookup<'_>) -> Result<SelfEnv> {
     let tab_id = env_value(env, ENV_TAB_ID);
     if let (Some(pane_id), Some(workspace_id), Some(tab_id)) = (&pane_id, &workspace_id, &tab_id) {
         return Ok(SelfEnv {
-            pane_id: pane_id.clone(),
-            workspace_id: workspace_id.clone(),
-            tab_id: tab_id.clone(),
+            handle: pane_id.clone(),
+            workspace_id: Some(workspace_id.clone()),
+            tab_id: Some(tab_id.clone()),
+            from_plugin_context: false,
+        });
+    }
+
+    // hc backend: the terminal address alone is the whole identity —
+    // there are no workspace/tab env vars (labels on the terminal record
+    // carry hints instead; see [`resolve_self`]).
+    if let Some(handle) = env_value(env, ENV_HC_TERMINAL_ID) {
+        return Ok(SelfEnv {
+            handle,
+            workspace_id: None,
+            tab_id: None,
             from_plugin_context: false,
         });
     }
@@ -120,9 +147,9 @@ fn plugin_context_env(context_json: &str) -> Result<SelfEnv> {
             .ok_or_else(|| CoreError::MissingEnv(ENV_PANE_ID.to_string()))
     };
     Ok(SelfEnv {
-        pane_id: pick(ctx.focused_pane_id)?,
-        workspace_id: pick(ctx.workspace_id)?,
-        tab_id: pick(ctx.tab_id)?,
+        handle: pick(ctx.focused_pane_id)?,
+        workspace_id: Some(pick(ctx.workspace_id)?),
+        tab_id: Some(pick(ctx.tab_id)?),
         from_plugin_context: true,
     })
 }
@@ -130,65 +157,84 @@ fn plugin_context_env(context_json: &str) -> Result<SelfEnv> {
 /// Everything `whoami` needs: env identity, live records, resolved scope.
 #[derive(Debug, Clone)]
 pub struct SelfIdentity {
-    /// Identity parsed from `HERDR_*` env vars.
+    /// Identity parsed from the backend env vars.
     pub env: SelfEnv,
-    /// The pane record (`pane.current`).
-    pub pane: PaneInfo,
-    /// The agent record (`agent.get`), when this pane hosts a known agent.
-    /// `None` for plain shell panes or when Herdr reports `agent_not_found`.
-    pub agent: Option<AgentInfo>,
+    /// The pane/terminal record for the self handle (`AgentRuntime::
+    /// get_pane`) — present even for agent-less shells, which still carry
+    /// `cwd`/`terminal_id`/`name`.
+    pub pane: RuntimeAgent,
+    /// The agent record (`AgentRuntime::get_agent`) when this handle
+    /// hosts a known agent. `None` for plain shells/terminals or when the
+    /// backend reports the handle as not found.
+    pub agent: Option<RuntimeAgent>,
+    /// Workspace display hint: the env id on herdr, else the `workspace`
+    /// terminal label on hc. `None` when neither source has one.
+    pub workspace: Option<String>,
+    /// Tab display hint: the env id on herdr, else the `tab` terminal
+    /// label on hc.
+    pub tab: Option<String>,
     /// Canonical project path the scope was derived from.
     pub canonical_path: PathBuf,
     /// The resolved project scope.
     pub scope: ResolvedScope,
 }
 
-/// Resolve this process's identity against a live Herdr server.
+/// Resolve this process's identity against a live backend.
 ///
 /// Flow:
-/// 1. Parse `HERDR_PANE_ID`/`HERDR_WORKSPACE_ID`/`HERDR_TAB_ID`.
-/// 2. `pane.current` with the pane id as `caller_pane_id`.
-/// 3. `agent.get` for the pane — tolerated as `None` on
-///    `agent_not_found` (plain shell panes have no agent record).
-/// 4. Scope resolution tries the agent record's cwd fields first, then the
-///    pane's; if both are empty, fetches `pane.process_info` once and
-///    retries before giving up with [`CoreError::ScopeUnresolved`].
-pub fn resolve_self(client: &HerdrClient, env: &EnvLookup<'_>) -> Result<SelfIdentity> {
+/// 1. Parse the backend env vars ([`self_env_from`]) — herdr triple,
+///    plugin-context JSON, or `HC_TERMINAL_ID`.
+/// 2. `AgentRuntime::get_pane` for the handle — the pane/terminal record
+///    (hard error when the handle does not resolve at all).
+/// 3. `AgentRuntime::get_agent` — tolerated as `None` on
+///    [`RuntimeError::NotFound`] (plain shells have no agent record).
+/// 4. Scope resolution prefers the agent record's cwd fields, then the
+///    pane record's; if both are empty, retries once with
+///    `AgentRuntime::process_info_cwds` before failing with
+///    [`CoreError::ScopeUnresolved`].
+pub fn resolve_self(runtime: &dyn AgentRuntime, env: &EnvLookup<'_>) -> Result<SelfIdentity> {
     let ids = self_env_from(env)?;
 
-    let pane = client.pane_current(Some(&ids.pane_id))?;
+    let pane = runtime.get_pane(&ids.handle)?;
 
-    let agent = match client.agent_get(&ids.pane_id) {
+    let agent = match runtime.get_agent(&ids.handle) {
         Ok(agent) => Some(agent),
-        Err(err) if err.is_agent_not_found() => None,
+        Err(RuntimeError::NotFound { .. }) => None,
         Err(err) => return Err(err.into()),
     };
 
     // Prefer the agent record's cwd fields (agent-aware reporting may be
-    // more current), then the pane's. On ScopeUnresolved, retry once with
-    // pane.process_info before failing.
-    let scope = match agent.as_ref() {
-        Some(agent) => resolve_scope_for_agent(agent, None),
-        None => resolve_scope_for_pane(&pane, None),
-    };
-    let scope = match scope {
+    // more current), then the pane record's — matching the historical
+    // agent-then-pane order. On ScopeUnresolved, retry once with the
+    // backend's process-info cwds before failing.
+    let primary = agent.as_ref().unwrap_or(&pane);
+    let scope = match resolve_scope_for_runtime(primary, &[]) {
         Ok(scope) => scope,
         Err(CoreError::ScopeUnresolved(_)) => {
-            // Pane record lacks cwd fields — ask the server for the
-            // foreground process table and retry.
-            let process_info = client.pane_process_info(Some(&pane.pane_id))?;
-            match agent.as_ref() {
-                Some(agent) => resolve_scope_for_agent(agent, Some(&process_info)),
-                None => resolve_scope_for_pane(&pane, Some(&process_info)),
-            }?
+            let cwds = runtime.process_info_cwds(&ids.handle)?;
+            resolve_scope_for_runtime(primary, &cwds)?
         }
         Err(err) => return Err(err),
     };
+
+    // Workspace/tab hints: env ids win; on hc (no such env vars) fall
+    // back to `workspace`/`tab` labels carried in the records' `extra`
+    // (agent record first, then the pane/terminal record).
+    let hint = |key: &str| {
+        [agent.as_ref(), Some(&pane)]
+            .into_iter()
+            .flatten()
+            .find_map(|r| r.extra.get(key).filter(|v| !v.is_empty()).cloned())
+    };
+    let workspace = ids.workspace_id.clone().or_else(|| hint("workspace"));
+    let tab = ids.tab_id.clone().or_else(|| hint("tab"));
 
     Ok(SelfIdentity {
         env: ids,
         pane,
         agent,
+        workspace,
+        tab,
         canonical_path: scope.canonical_path.clone(),
         scope,
     })
@@ -198,6 +244,10 @@ pub fn resolve_self(client: &HerdrClient, env: &EnvLookup<'_>) -> Result<SelfIde
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use herdr_runtime::{
+        AgentRuntime, EnvLookup as RuntimeEnvLookup, EventStream, RuntimeAgent, RuntimeError,
+        RuntimeStatus, SelfIdentity as RuntimeSelfIdentity, SendOutcome, WaitOutcome, WaitRequest,
+    };
     use std::collections::HashMap;
     use std::ffi::OsString;
     #[cfg(unix)]
@@ -222,17 +272,54 @@ mod tests {
     // ----- env parsing ------------------------------------------------------
 
     #[test]
-    fn self_env_requires_all_three_vars() {
+    fn self_env_requires_all_three_herdr_vars() {
         let full = env(&[
             ("HERDR_PANE_ID", "w1:p1"),
             ("HERDR_WORKSPACE_ID", "w1"),
             ("HERDR_TAB_ID", "w1:t1"),
         ]);
         let ids = self_env_from(&full).unwrap();
-        assert_eq!(ids.pane_id, "w1:p1");
-        assert_eq!(ids.workspace_id, "w1");
-        assert_eq!(ids.tab_id, "w1:t1");
+        assert_eq!(ids.handle, "w1:p1");
+        assert_eq!(ids.workspace_id.as_deref(), Some("w1"));
+        assert_eq!(ids.tab_id.as_deref(), Some("w1:t1"));
         assert!(!ids.from_plugin_context);
+    }
+
+    #[test]
+    fn self_env_hc_terminal_id_alone() {
+        let e = env(&[(ENV_HC_TERMINAL_ID, "t7")]);
+        let ids = self_env_from(&e).unwrap();
+        assert_eq!(ids.handle, "t7");
+        assert_eq!(ids.workspace_id, None);
+        assert_eq!(ids.tab_id, None);
+        assert!(!ids.from_plugin_context);
+    }
+
+    #[test]
+    fn self_env_hc_remote_address() {
+        let e = env(&[(ENV_HC_TERMINAL_ID, "machine/t7")]);
+        let ids = self_env_from(&e).unwrap();
+        assert_eq!(ids.handle, "machine/t7");
+    }
+
+    #[test]
+    fn self_env_herdr_wins_over_hc() {
+        let e = env(&[
+            ("HERDR_PANE_ID", "w1:p1"),
+            ("HERDR_WORKSPACE_ID", "w1"),
+            ("HERDR_TAB_ID", "w1:t1"),
+            (ENV_HC_TERMINAL_ID, "t7"),
+        ]);
+        let ids = self_env_from(&e).unwrap();
+        assert_eq!(ids.handle, "w1:p1");
+        assert_eq!(ids.workspace_id.as_deref(), Some("w1"));
+    }
+
+    #[test]
+    fn self_env_partial_herdr_falls_through_to_hc() {
+        let e = env(&[("HERDR_PANE_ID", "w1:p1"), (ENV_HC_TERMINAL_ID, "t7")]);
+        let ids = self_env_from(&e).unwrap();
+        assert_eq!(ids.handle, "t7");
     }
 
     #[test]
@@ -277,9 +364,9 @@ mod tests {
             r#"{"workspace_id":"w2","tab_id":"w2:t9","focused_pane_id":"w2:p1"}"#,
         )]);
         let ids = self_env_from(&e).unwrap();
-        assert_eq!(ids.pane_id, "w2:p1");
-        assert_eq!(ids.workspace_id, "w2");
-        assert_eq!(ids.tab_id, "w2:t9");
+        assert_eq!(ids.handle, "w2:p1");
+        assert_eq!(ids.workspace_id.as_deref(), Some("w2"));
+        assert_eq!(ids.tab_id.as_deref(), Some("w2:t9"));
         assert!(ids.from_plugin_context);
     }
 
@@ -299,9 +386,9 @@ mod tests {
             ),
         ]);
         let ids = self_env_from(&e).unwrap();
-        assert_eq!(ids.pane_id, "w2:p1");
-        assert_eq!(ids.workspace_id, "w2");
-        assert_eq!(ids.tab_id, "w2:t9");
+        assert_eq!(ids.handle, "w2:p1");
+        assert_eq!(ids.workspace_id.as_deref(), Some("w2"));
+        assert_eq!(ids.tab_id.as_deref(), Some("w2:t9"));
         assert!(ids.from_plugin_context);
     }
 
@@ -314,7 +401,7 @@ mod tests {
             (ENV_PLUGIN_CONTEXT_JSON, "not json"),
         ]);
         let ids = self_env_from(&e).unwrap();
-        assert_eq!(ids.pane_id, "w1:p1");
+        assert_eq!(ids.handle, "w1:p1");
         assert!(!ids.from_plugin_context);
     }
 
@@ -327,7 +414,7 @@ mod tests {
             (ENV_PLUGIN_CONTEXT_JSON, r#"{"workspace_id":"w2"}"#),
         ]);
         let ids = self_env_from(&e).unwrap();
-        assert_eq!(ids.pane_id, "w1:p1");
+        assert_eq!(ids.handle, "w1:p1");
         assert!(!ids.from_plugin_context);
     }
 
@@ -341,6 +428,207 @@ mod tests {
     fn self_env_plugin_context_malformed_is_invalid_env() {
         let e = env(&[(ENV_PLUGIN_CONTEXT_JSON, "not json")]);
         assert!(matches!(self_env_from(&e), Err(CoreError::InvalidEnv(_))));
+    }
+
+    // ----- mock runtime ------------------------------------------------------
+
+    /// Minimal [`AgentRuntime`] for identity tests: canned pane/agent
+    /// records plus optional process-info cwds. `get_pane` prefers the
+    /// pane record and falls back to the agent record — the herdr shape
+    /// where shells have a pane but no agent.
+    struct MockRuntime {
+        pane: Option<RuntimeAgent>,
+        agent: Option<RuntimeAgent>,
+        cwds: Vec<String>,
+    }
+
+    impl MockRuntime {
+        fn new(handle: &str) -> Self {
+            Self {
+                pane: Some(runtime_agent(handle, None, None)),
+                agent: None,
+                cwds: Vec::new(),
+            }
+        }
+    }
+
+    fn runtime_agent(
+        handle: &str,
+        cwd: Option<&str>,
+        foreground_cwd: Option<&str>,
+    ) -> RuntimeAgent {
+        RuntimeAgent {
+            handle: handle.to_string(),
+            terminal_id: Some(format!("term-{handle}")),
+            kind: None,
+            name: None,
+            cwd: cwd.map(str::to_string),
+            foreground_cwd: foreground_cwd.map(str::to_string),
+            status: RuntimeStatus::Idle,
+            interactive_ready: true,
+            launch_pending: false,
+            extra: Default::default(),
+        }
+    }
+
+    impl AgentRuntime for MockRuntime {
+        fn list_agents(&self) -> std::result::Result<Vec<RuntimeAgent>, RuntimeError> {
+            Ok(Vec::new())
+        }
+
+        fn get_agent(&self, handle: &str) -> std::result::Result<RuntimeAgent, RuntimeError> {
+            self.agent.clone().ok_or_else(|| RuntimeError::NotFound {
+                handle: handle.to_string(),
+            })
+        }
+
+        fn get_pane(&self, handle: &str) -> std::result::Result<RuntimeAgent, RuntimeError> {
+            self.pane
+                .clone()
+                .or_else(|| self.agent.clone())
+                .ok_or_else(|| RuntimeError::NotFound {
+                    handle: handle.to_string(),
+                })
+        }
+
+        fn send_prompt(
+            &self,
+            _handle: &str,
+            _text: &str,
+        ) -> std::result::Result<SendOutcome, RuntimeError> {
+            Err(RuntimeError::Unsupported("mock".into()))
+        }
+
+        fn wait_agent(
+            &self,
+            _handle: &str,
+            _req: WaitRequest,
+        ) -> std::result::Result<WaitOutcome, RuntimeError> {
+            Err(RuntimeError::Unsupported("mock".into()))
+        }
+
+        fn read_agent(
+            &self,
+            _handle: &str,
+            _lines: u32,
+        ) -> std::result::Result<String, RuntimeError> {
+            Err(RuntimeError::Unsupported("mock".into()))
+        }
+
+        fn send_keys(
+            &self,
+            _handle: &str,
+            _keys: &[String],
+        ) -> std::result::Result<(), RuntimeError> {
+            Err(RuntimeError::Unsupported("mock".into()))
+        }
+
+        fn self_identity(
+            &self,
+            _env: &RuntimeEnvLookup<'_>,
+        ) -> std::result::Result<RuntimeSelfIdentity, RuntimeError> {
+            Ok(RuntimeSelfIdentity {
+                handle: None,
+                agent: None,
+            })
+        }
+
+        fn subscribe_events(
+            &self,
+            _watched: &[String],
+        ) -> std::result::Result<EventStream, RuntimeError> {
+            Err(RuntimeError::Unsupported("mock".into()))
+        }
+
+        fn process_info_cwds(
+            &self,
+            _handle: &str,
+        ) -> std::result::Result<Vec<String>, RuntimeError> {
+            Ok(self.cwds.clone())
+        }
+    }
+
+    #[test]
+    fn resolve_self_hc_terminal_with_labels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        std::fs::create_dir(&project).unwrap();
+        let cwd = project.to_string_lossy().to_string();
+
+        let mut rt = MockRuntime::new("t7");
+        rt.pane = Some({
+            let mut a = runtime_agent("t7", Some(&cwd), None);
+            a.extra.insert("workspace".into(), "ws-9".into());
+            a.extra.insert("tab".into(), "tab-3".into());
+            a
+        });
+        rt.agent = Some(runtime_agent("t7", Some(&cwd), None));
+
+        let e = env(&[(ENV_HC_TERMINAL_ID, "t7")]);
+        let identity = resolve_self(&rt, &e).unwrap();
+
+        assert_eq!(identity.env.handle, "t7");
+        assert!(identity.agent.is_some());
+        // hc has no workspace/tab env vars — labels supply the hints.
+        assert_eq!(identity.workspace.as_deref(), Some("ws-9"));
+        assert_eq!(identity.tab.as_deref(), Some("tab-3"));
+        assert_eq!(
+            identity.canonical_path,
+            std::fs::canonicalize(&project).unwrap()
+        );
+        assert_eq!(identity.scope.scope_key.as_str().len(), 32);
+    }
+
+    #[test]
+    fn resolve_self_shell_pane_has_no_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().to_string_lossy().to_string();
+
+        let mut rt = MockRuntime::new("w1:p1");
+        rt.pane = Some(runtime_agent("w1:p1", Some(&cwd), None));
+        // agent stays None → get_agent returns NotFound.
+
+        let e = env(&[
+            ("HERDR_PANE_ID", "w1:p1"),
+            ("HERDR_WORKSPACE_ID", "w1"),
+            ("HERDR_TAB_ID", "w1:t1"),
+        ]);
+        let identity = resolve_self(&rt, &e).unwrap();
+        assert!(identity.agent.is_none());
+        assert_eq!(identity.workspace.as_deref(), Some("w1"));
+        assert_eq!(identity.tab.as_deref(), Some("w1:t1"));
+        assert_eq!(identity.pane.handle, "w1:p1");
+    }
+
+    #[test]
+    fn resolve_self_falls_back_to_process_info_cwds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("procproj");
+        std::fs::create_dir(&project).unwrap();
+        let cwd = project.to_string_lossy().to_string();
+
+        let mut rt = MockRuntime::new("t3");
+        // Records carry no cwd at all → only process-info cwds resolve.
+        rt.pane = Some(runtime_agent("t3", None, None));
+        rt.agent = Some(runtime_agent("t3", None, None));
+        rt.cwds = vec![cwd];
+
+        let e = env(&[(ENV_HC_TERMINAL_ID, "t3")]);
+        let identity = resolve_self(&rt, &e).unwrap();
+        assert_eq!(
+            identity.canonical_path,
+            std::fs::canonicalize(&project).unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_self_scope_unresolved_errors() {
+        let rt = MockRuntime::new("t3");
+        let e = env(&[(ENV_HC_TERMINAL_ID, "t3")]);
+        assert!(matches!(
+            resolve_self(&rt, &e),
+            Err(CoreError::ScopeUnresolved(_))
+        ));
     }
 
     // ----- fake socket -------------------------------------------------------
@@ -400,7 +688,7 @@ mod tests {
     #[cfg(unix)]
     fn pane_json(cwd: Option<&str>) -> serde_json::Value {
         serde_json::json!({
-            "type": "pane_current",
+            "type": "pane_info",
             "pane": {
                 "pane_id": "w1:p1",
                 "workspace_id": "w1",
@@ -423,13 +711,8 @@ mod tests {
         std::fs::create_dir(&project).unwrap();
         let cwd = project.to_string_lossy().to_string();
 
-        // pane.current → pane with cwd; agent.get → error agent_not_found;
-        // pane.process_info → not needed since cwd resolves.
-        // The fake server only supports result envelopes, so agent_not_found
-        // is simulated by a second listener? Simpler: give agent.get a
-        // valid agent_info result too.
         let mut methods = HashMap::new();
-        methods.insert("pane.current".to_string(), pane_json(Some(&cwd)));
+        methods.insert("pane.get".to_string(), pane_json(Some(&cwd)));
         methods.insert(
             "agent.get".to_string(),
             serde_json::json!({
@@ -450,20 +733,23 @@ mod tests {
         );
         let _rx = fake_server(&sock, methods);
 
-        let client = HerdrClient::from_socket_path(&sock);
+        let runtime =
+            herdr_runtime::HerdrRuntime::new(herdr_protocol::HerdrClient::from_socket_path(&sock));
         let e = env(&[
             ("HERDR_PANE_ID", "w1:p1"),
             ("HERDR_WORKSPACE_ID", "w1"),
             ("HERDR_TAB_ID", "w1:t1"),
         ]);
-        let identity = resolve_self(&client, &e).unwrap();
+        let identity = resolve_self(&runtime, &e).unwrap();
 
-        assert_eq!(identity.env.pane_id, "w1:p1");
-        assert_eq!(identity.pane.pane_id, "w1:p1");
+        assert_eq!(identity.env.handle, "w1:p1");
+        assert_eq!(identity.pane.handle, "w1:p1");
         assert_eq!(
             identity.agent.as_ref().unwrap().name.as_deref(),
             Some("builder")
         );
+        assert_eq!(identity.workspace.as_deref(), Some("w1"));
+        assert_eq!(identity.tab.as_deref(), Some("w1:t1"));
         assert_eq!(
             identity.canonical_path,
             std::fs::canonicalize(&project).unwrap()
@@ -483,12 +769,7 @@ mod tests {
         let mut methods = HashMap::new();
         // Pane has NO cwd fields → first resolve fails, then
         // pane.process_info supplies the foreground cwd.
-        methods.insert("pane.current".to_string(), pane_json(None));
-        // agent.get returns agent_not_found via error envelope — our fake
-        // server can't emit per-method error bodies, so omit agent.get:
-        // the unknown-method error code is "method_not_found", which is
-        // NOT is_agent_not_found → resolve_self would fail. Instead, give
-        // agent.get a minimal agent_info with no cwd fields.
+        methods.insert("pane.get".to_string(), pane_json(None));
         methods.insert(
             "agent.get".to_string(),
             serde_json::json!({
@@ -521,13 +802,14 @@ mod tests {
         );
         let _rx = fake_server(&sock, methods);
 
-        let client = HerdrClient::from_socket_path(&sock);
+        let runtime =
+            herdr_runtime::HerdrRuntime::new(herdr_protocol::HerdrClient::from_socket_path(&sock));
         let e = env(&[
             ("HERDR_PANE_ID", "w1:p1"),
             ("HERDR_WORKSPACE_ID", "w1"),
             ("HERDR_TAB_ID", "w1:t1"),
         ]);
-        let identity = resolve_self(&client, &e).unwrap();
+        let identity = resolve_self(&runtime, &e).unwrap();
         assert_eq!(
             identity.canonical_path,
             std::fs::canonicalize(&project).unwrap()
@@ -535,14 +817,51 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn resolve_self_without_env_vars_errors_before_socket() {
-        let tmp = tempfile::tempdir().unwrap();
-        // No listener at all: env parsing must fail first.
-        let client = HerdrClient::from_socket_path(tmp.path().join("nope.sock"));
+    fn resolve_self_without_env_vars_errors_before_runtime() {
+        struct PanicRuntime;
+        impl AgentRuntime for PanicRuntime {
+            fn list_agents(&self) -> std::result::Result<Vec<RuntimeAgent>, RuntimeError> {
+                panic!("must not be called")
+            }
+            fn get_agent(&self, _h: &str) -> std::result::Result<RuntimeAgent, RuntimeError> {
+                panic!("must not be called")
+            }
+            fn send_prompt(
+                &self,
+                _h: &str,
+                _t: &str,
+            ) -> std::result::Result<SendOutcome, RuntimeError> {
+                panic!("must not be called")
+            }
+            fn wait_agent(
+                &self,
+                _h: &str,
+                _r: WaitRequest,
+            ) -> std::result::Result<WaitOutcome, RuntimeError> {
+                panic!("must not be called")
+            }
+            fn read_agent(&self, _h: &str, _l: u32) -> std::result::Result<String, RuntimeError> {
+                panic!("must not be called")
+            }
+            fn send_keys(&self, _h: &str, _k: &[String]) -> std::result::Result<(), RuntimeError> {
+                panic!("must not be called")
+            }
+            fn self_identity(
+                &self,
+                _e: &RuntimeEnvLookup<'_>,
+            ) -> std::result::Result<RuntimeSelfIdentity, RuntimeError> {
+                panic!("must not be called")
+            }
+            fn subscribe_events(
+                &self,
+                _watched: &[String],
+            ) -> std::result::Result<EventStream, RuntimeError> {
+                panic!("must not be called")
+            }
+        }
         let e = env(&[]);
         assert!(matches!(
-            resolve_self(&client, &e),
+            resolve_self(&PanicRuntime, &e),
             Err(CoreError::MissingEnv(_))
         ));
     }

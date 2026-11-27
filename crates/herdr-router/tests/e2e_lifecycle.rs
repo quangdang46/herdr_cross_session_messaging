@@ -45,6 +45,23 @@ fn wait_until(timeout: Duration, what: &str, mut f: impl FnMut() -> bool) -> boo
     false
 }
 
+/// Wait until an `events.subscribe` carrying a per-pane
+/// `pane.agent_status_changed` subscription for `pane` has been
+/// recorded. The first subscribe goes out before the snapshot sync
+/// populates the watched set, and a resubscribe follows; frames pushed
+/// while only the stale subscription is live are dropped, so tests must
+/// wait for this before pushing pane-scoped events.
+fn wait_for_status_subscription(server: &FakeHerdr, pane: &str) -> bool {
+    wait_until(WAIT, "per-pane status subscription", || {
+        server.requests_for("events.subscribe").iter().any(|req| {
+            req.params["subscriptions"].as_array().is_some_and(|subs| {
+                subs.iter()
+                    .any(|s| s["type"] == "pane.agent_status_changed" && s["pane_id"] == pane)
+            })
+        })
+    })
+}
+
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -278,7 +295,9 @@ fn pane_moved_keeps_agent_id_and_rekeys_pane() {
     assert_eq!(before.pane_id.as_deref(), Some("w1:p1"));
     let agent_id = before.agent_id.clone();
 
-    // pane.move w1:p1 → w1:p9 (same terminal).
+    // pane.move w1:p1 → w1:p9 (same terminal). Wait for the resubscribe
+    // carrying the per-pane filters so the frame is not dropped.
+    assert!(wait_for_status_subscription(&server, "w1:p1"));
     server.push_event(pane_moved_event("w1:p9", "term_a", cwd));
 
     assert!(
@@ -372,6 +391,7 @@ fn delivery_falls_back_to_current_pane_id() {
     let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker = DeliveryWorker::new(
+        Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
         client,
         Arc::clone(&pools),
         shutdown,
@@ -435,7 +455,14 @@ fn blocked_status_schedules_message_and_idle_delivers() {
     let pool = only_pool(&daemon);
     let agent = live_agent(&pool);
 
-    // Agent reports blocked via the per-pane status subscription.
+    // Agent reports blocked via the per-pane status subscription. Wait
+    // for the resubscribe that carries the per-pane filter — a frame
+    // pushed while only the initial (unfiltered) subscription is live is
+    // dropped.
+    assert!(
+        wait_for_status_subscription(&server, "w1:p1"),
+        "expected events.subscribe with per-pane status subscription"
+    );
     server.push_subscription_event(status_event("w1:p1", "blocked"));
     assert!(wait_until(WAIT, "status -> blocked", || {
         pool.registry()
@@ -546,7 +573,9 @@ fn pane_exited_offline_dead_letters_with_notification() {
     let pool = only_pool(&daemon);
     let agent = live_agent(&pool);
 
-    // pane.exited → offline.
+    // pane.exited → offline. Wait for the resubscribe carrying the
+    // per-pane filter so the frame is not dropped.
+    assert!(wait_for_status_subscription(&server, "w1:p1"));
     server.push_event(json!({
         "event": "pane_exited",
         "data": {
@@ -754,6 +783,10 @@ fn agent_detected_bootstraps_once_and_version_bump_rebootstraps() {
     );
     let agent_id = live_agent(&pool()).agent_id.clone();
 
+    // The detection grew the watched set → the daemon resubscribes with a
+    // per-pane status filter; further pushed frames must wait for it.
+    assert!(wait_for_status_subscription(&server, "w1:p1"));
+
     // A repeated detection is a no-op for bootstrap (version persisted).
     // Wait for the agent.get lookup proving the event was processed, then
     // assert no additional bootstrap prompt appeared.
@@ -845,7 +878,12 @@ fn bootstrap_blocked_rejections_do_not_exhaust_attempt_budget() {
 
     // Three sightings while blocked → three rejected bootstrap attempts.
     // Under the old accounting these burned the whole per-run budget.
-    for _ in 0..3 {
+    // The first detection grows the watched set and triggers a
+    // resubscribe; later pushes must wait for the per-pane filter.
+    for i in 0..3 {
+        if i > 0 {
+            assert!(wait_for_status_subscription(&server, "w1:p1"));
+        }
         let prompts_before = server.requests_for("agent.prompt").len();
         server.push_event(agent_detected_event("w1:p1"));
         assert!(
@@ -869,6 +907,7 @@ fn bootstrap_blocked_rejections_do_not_exhaust_attempt_budget() {
     );
 
     // Agent unblocks → the next bootstrap attempt must still be allowed.
+    assert!(wait_for_status_subscription(&server, "w1:p1"));
     server.push_subscription_event(status_event("w1:p1", "idle"));
     assert!(
         wait_until(WAIT, "bootstrap after unblock", || {
@@ -957,15 +996,13 @@ fn bootstrap_waits_for_interactive_ready() {
     assert!(!record.interactive_ready, "readiness must persist");
     assert!(record.launch_pending);
 
-    // The new pane joined the watched set → the daemon resubscribes;
-    // pushing before that settles can drop the frame on the floor.
+    // The new pane joined the watched set → the daemon resubscribes with
+    // a per-pane status filter; pushing before that settles can drop the
+    // frame on the floor.
     assert!(
-        wait_until(WAIT, "resubscribe after detection", || {
-            server.requests_for("events.subscribe").len() >= 2
-        }),
+        wait_for_status_subscription(&server, "w1:p1"),
         "daemon did not resubscribe after agent detection"
     );
-    std::thread::sleep(Duration::from_millis(100));
 
     // Resume finishes → pane.updated refreshes AgentInfo → ready → the
     // bootstrap prompt goes out exactly once.

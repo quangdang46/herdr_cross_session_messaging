@@ -635,7 +635,7 @@ impl AgentRuntime for HcRuntime {
         Ok(SelfIdentity { handle, agent })
     }
 
-    fn subscribe_events(&self) -> Result<EventStream, RuntimeError> {
+    fn subscribe_events(&self, _watched: &[String]) -> Result<EventStream, RuntimeError> {
         // Dedicated connection: `events.subscribe` turns it into a
         // notification-only stream, so RPC keeps using `self.rpc`.
         let event_client = HcClient::connect(clone_command(&self.connect))?;

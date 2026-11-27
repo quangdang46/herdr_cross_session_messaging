@@ -39,6 +39,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
 use herdr_protocol::{AgentInfo, PaneInfo, PaneProcessInfo};
+use herdr_runtime::RuntimeAgent;
 use sha2::{Digest, Sha256};
 
 use crate::error::{CoreError, Result};
@@ -237,11 +238,53 @@ pub fn resolve_scope_with_mode(
     process_info: Option<&PaneProcessInfo>,
     mode: ScopeMode,
 ) -> Result<ResolvedScope> {
-    let candidates = [cwd, foreground_cwd]
-        .into_iter()
-        .flatten()
-        .chain(process_info_cwds(process_info));
+    resolve_scope_iter(
+        [cwd, foreground_cwd]
+            .into_iter()
+            .flatten()
+            .chain(process_info_cwds(process_info)),
+        mode,
+    )
+}
 
+/// Resolve the scope for a runtime-normalized [`RuntimeAgent`]
+/// ([`herdr_runtime::AgentRuntime`] backends: herdr `AgentInfo`/`PaneInfo`
+/// or hc `Terminal` records mapped into one shape).
+///
+/// Candidate order matches [`resolve_scope`]: `cwd` (launch directory,
+/// authoritative) → `foreground_cwd` → `extra_cwds`. `extra_cwds` carries
+/// backend-specific fallbacks such as herdr `pane.process_info` foreground
+/// cwds (`AgentRuntime::process_info_cwds`); hc has no process table and
+/// passes an empty slice.
+pub fn resolve_scope_for_runtime(
+    agent: &RuntimeAgent,
+    extra_cwds: &[String],
+) -> Result<ResolvedScope> {
+    resolve_scope_for_runtime_with_mode(agent, extra_cwds, scope_mode())
+}
+
+/// [`resolve_scope_for_runtime`] with an explicit [`ScopeMode`]
+/// (testable variant).
+pub fn resolve_scope_for_runtime_with_mode(
+    agent: &RuntimeAgent,
+    extra_cwds: &[String],
+    mode: ScopeMode,
+) -> Result<ResolvedScope> {
+    resolve_scope_iter(
+        [agent.cwd.as_deref(), agent.foreground_cwd.as_deref()]
+            .into_iter()
+            .flatten()
+            .chain(extra_cwds.iter().map(String::as_str)),
+        mode,
+    )
+}
+
+/// Shared candidate walk: first non-empty cwd wins, canonicalized and
+/// keyed under `mode`.
+fn resolve_scope_iter<'a>(
+    candidates: impl Iterator<Item = &'a str>,
+    mode: ScopeMode,
+) -> Result<ResolvedScope> {
     for candidate in candidates {
         let trimmed = candidate.trim();
         if trimmed.is_empty() {

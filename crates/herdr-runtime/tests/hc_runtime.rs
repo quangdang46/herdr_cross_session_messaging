@@ -552,7 +552,7 @@ fn subscribe_events_returns_snapshot_then_normalized_events() {
     )
     .unwrap();
 
-    let stream = rt.subscribe_events().unwrap();
+    let stream = rt.subscribe_events(&[]).unwrap();
     assert_eq!(stream.snapshot.len(), 1);
     assert_eq!(stream.snapshot[0].handle, "t9");
     assert_eq!(stream.snapshot[0].status, RuntimeStatus::Idle);
@@ -608,7 +608,7 @@ fn subscribe_events_created_event_maps_to_agent_seen() {
     )
     .unwrap();
 
-    let stream = rt.subscribe_events().unwrap();
+    let stream = rt.subscribe_events(&[]).unwrap();
     assert!(stream.snapshot.is_empty());
     let event = stream
         .events

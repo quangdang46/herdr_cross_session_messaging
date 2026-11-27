@@ -22,6 +22,7 @@ herdr-pool-core.workspace = true
 herdr-pool-store.workspace = true
 herdr-plugin.workspace = true
 herdr-router.workspace = true
+herdr-runtime.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

@@ -4,7 +4,7 @@
 use std::ffi::OsString;
 use std::sync::mpsc;
 
-use herdr_protocol::MetadataMap;
+use herdr_protocol::{HerdrClient, MetadataMap};
 
 /// Environment lookup used by [`AgentRuntime::self_identity`].
 ///
@@ -164,6 +164,11 @@ pub enum RuntimeEvent {
     AgentGone { handle: String },
     /// Handle was re-keyed (herdr `pane.moved`; never fires on hc).
     HandleRekeyed { old: String, new: String },
+    /// Workspace/tab-level topology change (herdr `workspace.closed` /
+    /// `tab.closed`) — cascading closes the event does not itemize.
+    /// Consumers should run a full reconcile. Never fires on hc (flat
+    /// terminal model).
+    TopologyChanged,
 }
 
 /// Snapshot + live stream returned by [`AgentRuntime::subscribe_events`].
@@ -212,6 +217,23 @@ pub trait AgentRuntime: Send + Sync {
     /// Single record refresh. `NotFound` when the handle is stale.
     fn get_agent(&self, handle: &str) -> Result<RuntimeAgent, crate::RuntimeError>;
 
+    /// Pane/terminal-level record for `handle`, including agent-less
+    /// panes — the self-identity/scope fallback path. herdr: `pane.get`
+    /// (a shell pane still carries `cwd`/`terminal_id`); hc: identical to
+    /// [`AgentRuntime::get_agent`] since terminals are flat. The default
+    /// delegates to `get_agent`, which is correct for flat backends.
+    fn get_pane(&self, handle: &str) -> Result<RuntimeAgent, crate::RuntimeError> {
+        self.get_agent(handle)
+    }
+
+    /// Extra cwd candidates for scope resolution — the foreground-process
+    /// table behind `cwd`/`foreground_cwd`. herdr: `pane.process_info`
+    /// cwds; hc has no process table, so the default empty vec applies.
+    /// Callers consult this only after record cwds fail to resolve.
+    fn process_info_cwds(&self, _handle: &str) -> Result<Vec<String>, crate::RuntimeError> {
+        Ok(Vec::new())
+    }
+
     /// Deliver a prompt/envelope. The ONLY write path — never raw keys.
     fn send_prompt(&self, handle: &str, text: &str) -> Result<SendOutcome, crate::RuntimeError>;
 
@@ -235,7 +257,22 @@ pub trait AgentRuntime: Send + Sync {
     /// Subscribe to backend events → normalized [`RuntimeEvent`]s.
     /// MUST return a snapshot first (registry bootstrap), then a stream.
     /// Caller owns reconnect/backoff.
-    fn subscribe_events(&self) -> Result<EventStream, crate::RuntimeError>;
+    ///
+    /// `watched` lists handles the caller wants fine-grained status
+    /// events for. On herdr these become per-pane
+    /// `pane.agent_status_changed` subscriptions (the server has no
+    /// global variant); on hc the feed is already global and the set is
+    /// ignored. Backends may also ignore it entirely.
+    fn subscribe_events(&self, watched: &[String]) -> Result<EventStream, crate::RuntimeError>;
+
+    /// Escape hatch: the underlying [`HerdrClient`] when this runtime
+    /// wraps the herdr backend, `None` on other backends. Temporary
+    /// bridge for pool code that still needs herdr-only RPCs (pane
+    /// labels, `pane.process_info`) until those features are ported or
+    /// dropped — new code should not depend on it.
+    fn herdr_client(&self) -> Option<&HerdrClient> {
+        None
+    }
 
     /// User-facing toast. herdr: `notification.show`; hc: no-op v1.
     fn notify(&self, title: &str, body: Option<&str>) -> Result<(), crate::RuntimeError> {

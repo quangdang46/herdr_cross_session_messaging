@@ -79,6 +79,25 @@ impl AgentRuntime for HerdrRuntime {
         }
     }
 
+    fn get_pane(&self, handle: &str) -> Result<RuntimeAgent, RuntimeError> {
+        match self.client.pane_get(handle) {
+            Ok(pane) => Ok(runtime_agent_from_pane(&pane)),
+            Err(err) if is_not_found(&err) => Err(RuntimeError::NotFound {
+                handle: handle.to_string(),
+            }),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn process_info_cwds(&self, handle: &str) -> Result<Vec<String>, RuntimeError> {
+        let info = self.client.pane_process_info(Some(handle))?;
+        Ok(info
+            .foreground_processes
+            .iter()
+            .filter_map(|p| p.cwd.clone())
+            .collect())
+    }
+
     fn send_prompt(&self, handle: &str, text: &str) -> Result<SendOutcome, RuntimeError> {
         match self.client.agent_prompt(handle, text, None) {
             // herdr `agent.prompt` has no "started" signal — submission is
@@ -173,7 +192,7 @@ impl AgentRuntime for HerdrRuntime {
         Ok(SelfIdentity { handle, agent })
     }
 
-    fn subscribe_events(&self) -> Result<EventStream, RuntimeError> {
+    fn subscribe_events(&self, watched: &[String]) -> Result<EventStream, RuntimeError> {
         // Snapshot first (registry bootstrap), then the live stream.
         let snapshot = self
             .client
@@ -182,7 +201,9 @@ impl AgentRuntime for HerdrRuntime {
             .iter()
             .map(runtime_agent)
             .collect();
-        let stream = self.client.events_subscribe(lifecycle_subscriptions())?;
+        let stream = self
+            .client
+            .events_subscribe(lifecycle_subscriptions(watched))?;
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut stream = stream;
@@ -229,13 +250,17 @@ impl AgentRuntime for HerdrRuntime {
             cross_machine: false,
         }
     }
+
+    fn herdr_client(&self) -> Option<&HerdrClient> {
+        Some(&self.client)
+    }
 }
 
-/// Static lifecycle subscriptions — mirrors `herdr-router`'s static set.
-/// Per-pane `pane.agent_status_changed` is omitted: the trait signature
-/// carries no watched-pane set (see module docs).
-fn lifecycle_subscriptions() -> Vec<Subscription> {
-    vec![
+/// Static lifecycle subscriptions plus a per-handle
+/// `pane.agent_status_changed` for every watched handle (the server
+/// requires a concrete `pane_id`; on herdr the handle IS the pane id).
+fn lifecycle_subscriptions(watched: &[String]) -> Vec<Subscription> {
+    let mut subs = vec![
         Subscription::PaneAgentDetected,
         Subscription::PaneCreated,
         Subscription::PaneUpdated,
@@ -244,7 +269,14 @@ fn lifecycle_subscriptions() -> Vec<Subscription> {
         Subscription::PaneExited,
         Subscription::WorkspaceClosed,
         Subscription::TabClosed,
-    ]
+    ];
+    for handle in watched {
+        subs.push(Subscription::PaneAgentStatusChanged {
+            pane_id: handle.clone(),
+            agent_status: None,
+        });
+    }
+    subs
 }
 
 /// Normalize one subscription frame into a [`RuntimeEvent`].
@@ -261,23 +293,33 @@ fn frame_to_runtime_event(frame: &SubscriptionFrame) -> Option<RuntimeEvent> {
                 pane_id,
                 agent,
                 final_status,
+                released,
                 ..
-            } => Some(RuntimeEvent::AgentSeen {
-                agent: RuntimeAgent {
-                    handle: pane_id.clone(),
-                    terminal_id: None,
-                    kind: agent.clone(),
-                    name: None,
-                    cwd: None,
-                    foreground_cwd: None,
-                    status: final_status
-                        .map(runtime_status)
-                        .unwrap_or(RuntimeStatus::Unknown),
-                    interactive_ready: true,
-                    launch_pending: false,
-                    extra: Default::default(),
-                },
-            }),
+            } => {
+                if *released {
+                    // Agent released from the pane — the record is gone.
+                    Some(RuntimeEvent::AgentGone {
+                        handle: pane_id.clone(),
+                    })
+                } else {
+                    Some(RuntimeEvent::AgentSeen {
+                        agent: RuntimeAgent {
+                            handle: pane_id.clone(),
+                            terminal_id: None,
+                            kind: agent.clone(),
+                            name: None,
+                            cwd: None,
+                            foreground_cwd: None,
+                            status: final_status
+                                .map(runtime_status)
+                                .unwrap_or(RuntimeStatus::Unknown),
+                            interactive_ready: true,
+                            launch_pending: false,
+                            extra: Default::default(),
+                        },
+                    })
+                }
+            }
             EventData::PaneAgentStatusChanged {
                 pane_id,
                 agent_status,
@@ -299,6 +341,9 @@ fn frame_to_runtime_event(frame: &SubscriptionFrame) -> Option<RuntimeEvent> {
                 old: previous_pane_id.clone(),
                 new: pane.pane_id.clone(),
             }),
+            EventData::WorkspaceClosed { .. } | EventData::TabClosed { .. } => {
+                Some(RuntimeEvent::TopologyChanged)
+            }
             _ => None,
         },
         SubscriptionFrame::SubscriptionEvent(envelope) => match &envelope.data {

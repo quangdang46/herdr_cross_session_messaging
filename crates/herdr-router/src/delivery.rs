@@ -1,19 +1,19 @@
 //! Outbox delivery worker.
 //!
 //! Drains `messages.outbox_due(now)` across every known scope pool and
-//! submits each pending message via `agent.prompt` with the
-//! [`crate::envelope`] text. The recipient's *current* target is resolved
+//! submits each pending message via the [`AgentRuntime::send_prompt`]
+//! prompt path with the [`crate::envelope`] text. The recipient's *current* target is resolved
 //! from the registry on every attempt — target strings are never cached,
 //! so `pane.move` re-keys and agent restarts are picked up automatically.
 //!
 //! ## Failure policy
 //!
-//! | `agent.prompt` outcome | action |
+//! | `send_prompt` outcome | action |
 //! |---|---|
-//! | success | `mark_delivered` |
-//! | `agent_blocked` | `defer(now + 15s)` — harness queues nothing; retry shortly, no attempt consumed; throttled pane snapshot + `notification.show` rescue notice; a [`RescueManager`] job is ensured for peer-assisted recovery |
-//! | `agent_not_ready` / `agent_not_found` / `agent_target_ambiguous` / stalled | `record_failure(now + backoff(attempts))` |
-//! | transport/timeout/other | `record_failure(now + backoff(attempts))` |
+//! | `Delivered` | `mark_delivered` |
+//! | `Deferred(Blocked)` | `defer(now + 15s)` — harness queues nothing; retry shortly, no attempt consumed; throttled pane snapshot + `notify` rescue notice; a [`RescueManager`] job is ensured for peer-assisted recovery |
+//! | `Deferred(NotReady)` | `defer(now + 15s)` — TUI not interactive-ready; no attempt consumed |
+//! | `Failed` / transport / timeout / other | `record_failure(now + backoff(attempts))` |
 //! | recipient offline > [`OFFLINE_DEAD_AFTER`] | dead-letter immediately + throttled `notification.show` |
 //!
 //! `record_failure` dead-letters at [`MAX_DELIVERY_ATTEMPTS`] attempts.
@@ -31,9 +31,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use herdr_pool_store::{Message, MessageStatus, MessageStore, PoolStore, STATUS_OFFLINE};
-use herdr_protocol::{
-    AgentReadParams, HerdrClient, HerdrError, NotificationShowParams, ReadOptions, ReadSource,
-};
+use herdr_protocol::HerdrClient;
+use herdr_runtime::{AgentRuntime, DeferReason, SendOutcome};
 
 use crate::envelope::message_envelope;
 use crate::error::Result;
@@ -95,7 +94,8 @@ fn jitter_nanos() -> u128 {
 
 /// Delivery worker: drains outboxes until shutdown.
 pub struct DeliveryWorker {
-    client: HerdrClient,
+    /// Backend-agnostic prompt/read/notify path.
+    runtime: Arc<dyn AgentRuntime>,
     pools: Arc<Pools>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
     notify: Notify,
@@ -113,17 +113,22 @@ pub struct DeliveryWorker {
 }
 
 impl DeliveryWorker {
+    /// `runtime` serves prompts/reads/toasts; `rescue_client` stays a raw
+    /// [`HerdrClient`] because [`RescueManager`] still uses Herdr-only
+    /// read sources (`visible`, `recent-unwrapped`) the trait does not
+    /// carry yet.
     pub fn new(
-        client: HerdrClient,
+        runtime: Arc<dyn AgentRuntime>,
+        rescue_client: HerdrClient,
         pools: Arc<Pools>,
         shutdown: Arc<std::sync::atomic::AtomicBool>,
         notify: Notify,
         poll_interval: Duration,
     ) -> Self {
         Self {
-            rescue: RescueManager::new(client.clone(), Arc::clone(&pools)),
-            nudge: NudgeManager::new(client.clone(), Arc::clone(&pools)),
-            client,
+            rescue: RescueManager::new(rescue_client, Arc::clone(&pools)),
+            nudge: NudgeManager::new(Arc::clone(&runtime), Arc::clone(&pools)),
+            runtime,
             pools,
             shutdown,
             notify,
@@ -150,7 +155,7 @@ impl DeliveryWorker {
 
     /// Override the nudge sweep timings (tests).
     pub fn with_nudge_timings(mut self, after: Duration, repeat: Duration) -> Self {
-        self.nudge = NudgeManager::new(self.client.clone(), Arc::clone(&self.pools))
+        self.nudge = NudgeManager::new(Arc::clone(&self.runtime), Arc::clone(&self.pools))
             .with_timings(after, repeat);
         self
     }
@@ -267,15 +272,17 @@ impl DeliveryWorker {
         let sender = registry.get_agent(&msg.from_agent).ok().flatten();
         let text = message_envelope(msg, sender.as_ref());
 
-        match self.client.agent_prompt(&target, &text, None) {
-            Ok(_) => {
+        match self.runtime.send_prompt(&target, &text) {
+            Ok(SendOutcome::Delivered { .. }) => {
                 messages.mark_delivered(&msg.id)?;
                 tracing::info!(message = %msg.id, to = %msg.to_agent, "message delivered");
                 if self.notify_on_delivery {
                     self.notify_delivered(&recipient, sender.as_ref(), msg);
                 }
             }
-            Err(err) if err.is_agent_blocked() => {
+            Ok(SendOutcome::Deferred {
+                reason: DeferReason::Blocked,
+            }) => {
                 // Agent is alive but busy: nothing was sent. Defer without
                 // consuming an attempt — blocking is not a delivery
                 // failure, and dead-lettering busy agents' mail would lose
@@ -288,21 +295,35 @@ impl DeliveryWorker {
                     tracing::debug!(agent = %recipient.agent_id, error = %err, "rescue ensure_job failed");
                 }
             }
+            Ok(SendOutcome::Deferred {
+                reason: DeferReason::NotReady,
+            }) => {
+                // Same policy as the interactive_ready/launch_pending
+                // gate above: wait without consuming an attempt.
+                self.defer_retry(messages, msg, NOT_READY_BACKOFF)?;
+            }
+            Ok(SendOutcome::Failed { kind, message }) => {
+                tracing::debug!(
+                    message = %msg.id,
+                    ?kind,
+                    error = %message,
+                    "prompt rejected; backing off"
+                );
+                self.record_retry(
+                    messages,
+                    msg,
+                    retry_delay_jittered(msg.attempt_count, jitter_nanos()),
+                )?;
+            }
             Err(err) => {
-                let delay = if err.is_agent_not_found()
-                    || err.is_agent_target_ambiguous()
-                    || err.is_agent_not_ready()
-                    || err.is_timeout()
-                    || matches!(err, HerdrError::Closed | HerdrError::Transport(_))
-                {
-                    retry_delay_jittered(msg.attempt_count, jitter_nanos())
-                } else {
-                    // agent_prompt_failed, empty_agent_prompt, protocol etc.:
-                    // still retry with backoff; MAX_DELIVERY_ATTEMPTS bounds it.
-                    retry_delay_jittered(msg.attempt_count, jitter_nanos())
-                };
+                // Transport/protocol failures: still retry with backoff;
+                // MAX_DELIVERY_ATTEMPTS bounds it.
                 tracing::debug!(message = %msg.id, error = %err, "prompt failed; backing off");
-                self.record_retry(messages, msg, delay)?;
+                self.record_retry(
+                    messages,
+                    msg,
+                    retry_delay_jittered(msg.attempt_count, jitter_nanos()),
+                )?;
             }
         }
         Ok(())
@@ -312,16 +333,9 @@ impl DeliveryWorker {
     /// log/toast snapshot (delivery-side diagnostic only — the rescue
     /// snapshotter in [`crate::rescue`] captures the full visible TUI).
     fn pane_snapshot(&self, target: &str) -> String {
-        match self.client.agent_read(&AgentReadParams {
-            target: target.to_string(),
-            source: ReadSource::Recent,
-            options: ReadOptions {
-                lines: Some(BLOCKED_SNAPSHOT_LINES),
-                ..ReadOptions::default()
-            },
-        }) {
-            Ok(snapshot) => {
-                let tail: Vec<&str> = snapshot.text.lines().rev().take(15).collect();
+        match self.runtime.read_agent(target, BLOCKED_SNAPSHOT_LINES) {
+            Ok(text) => {
+                let tail: Vec<&str> = text.lines().rev().take(15).collect();
                 tail.into_iter().rev().collect::<Vec<_>>().join("\n")
             }
             Err(_) => "(snapshot unavailable)".to_string(),
@@ -428,12 +442,7 @@ impl DeliveryWorker {
             "{} — messages are queued and will deliver when it unblocks",
             recipient.agent_id
         );
-        if let Err(err) = self.client.notification_show(&NotificationShowParams {
-            title,
-            body: Some(body),
-            position: None,
-            sound: None,
-        }) {
+        if let Err(err) = self.runtime.notify(&title, Some(&body)) {
             tracing::debug!(error = %err, "blocked-agent notification failed");
         }
     }
@@ -453,12 +462,9 @@ impl DeliveryWorker {
             .and_then(|s| s.name.clone())
             .unwrap_or_else(|| msg.from_agent.clone());
         let snippet: String = msg.content.chars().take(80).collect();
-        if let Err(err) = self.client.notification_show(&NotificationShowParams {
-            title: format!("herdr-pool: new message for {to}"),
-            body: Some(format!("from {from}: {snippet}")),
-            position: None,
-            sound: None,
-        }) {
+        let title = format!("herdr-pool: new message for {to}");
+        let body = format!("from {from}: {snippet}");
+        if let Err(err) = self.runtime.notify(&title, Some(&body)) {
             tracing::debug!(error = %err, "delivery notification failed");
         }
     }
@@ -476,12 +482,7 @@ impl DeliveryWorker {
         self.last_dead_notify.set(Some(now));
         let title = format!("herdr-pool: message {} could not be delivered", msg.id);
         let body = format!("to {} — marked dead after repeated failures", msg.to_agent);
-        if let Err(err) = self.client.notification_show(&NotificationShowParams {
-            title,
-            body: Some(body),
-            position: None,
-            sound: None,
-        }) {
+        if let Err(err) = self.runtime.notify(&title, Some(&body)) {
             tracing::debug!(error = %err, "dead-letter notification failed");
         }
     }

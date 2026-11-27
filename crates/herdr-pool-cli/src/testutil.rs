@@ -98,16 +98,16 @@ impl Fixture {
         .collect()
     }
 
-    /// Script `pane.current` so `resolve_self` sees `self_pane`, and
+    /// Script `pane.get` so `resolve_self` sees `self_pane`, and
     /// register an agent record for `agent.get` on that pane.
     ///
     /// FakeHerdr consumes one scripted responder per request, so each
     /// responder is queued [`SCRIPTED_DEPTH`] times — enough for the
     /// several socket calls a single test makes across commands.
     pub fn script_self(&self, self_pane: &str, self_terminal: &str, cwd: &str) {
-        let pane_result = pane_current_result(self_pane, self_terminal, cwd);
+        let pane_result = pane_get_result(self_pane, self_terminal, cwd);
         for _ in 0..SCRIPTED_DEPTH {
-            self.server.on("pane.current").respond(pane_result.clone());
+            self.server.on("pane.get").respond(pane_result.clone());
         }
         self.script_agent_get(
             self_pane,
@@ -184,11 +184,11 @@ pub fn agent_value(
     })
 }
 
-/// `pane.current` result for a pane launched in `cwd`.
-pub fn pane_current_result(pane_id: &str, terminal_id: &str, cwd: &str) -> Value {
+/// `pane.get` result for a pane launched in `cwd`.
+pub fn pane_get_result(pane_id: &str, terminal_id: &str, cwd: &str) -> Value {
     let ws = pane_id.split(':').next().unwrap_or("w1");
     json!({
-        "type": "pane_current",
+        "type": "pane_info",
         "pane": {
             "pane_id": pane_id,
             "workspace_id": ws,

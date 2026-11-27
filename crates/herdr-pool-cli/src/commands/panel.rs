@@ -105,10 +105,10 @@ pub fn run(ctx: &Ctx, env: &EnvLookup<'_>, action: &PanelAction) -> CmdResult<()
 /// additionally falls back to the `[[events]]` payload.
 fn context_pane(ctx: &Ctx, env: &EnvLookup<'_>) -> CmdResult<Option<PaneInfo>> {
     if let Ok(self_env) = identity::self_env_from(env) {
-        match ctx.client.pane_get(&self_env.pane_id) {
+        match ctx.client.pane_get(&self_env.handle) {
             Ok(pane) => return Ok(Some(pane)),
             Err(err) => {
-                tracing::debug!(pane = %self_env.pane_id, error = %err, "context pane.get failed");
+                tracing::debug!(pane = %self_env.handle, error = %err, "context pane.get failed");
             }
         }
     }

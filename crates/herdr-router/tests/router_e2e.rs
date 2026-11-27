@@ -32,6 +32,23 @@ fn wait_until(timeout: Duration, what: &str, mut f: impl FnMut() -> bool) -> boo
     false
 }
 
+/// Wait until an `events.subscribe` carrying a per-pane
+/// `pane.agent_status_changed` subscription for `pane` has been
+/// recorded. The first subscribe goes out before the snapshot sync
+/// populates the watched set, and a resubscribe follows; frames pushed
+/// while only the stale subscription is live are dropped, so tests must
+/// wait for this before pushing pane-scoped events.
+fn wait_for_status_subscription(server: &FakeHerdr, pane: &str) -> bool {
+    wait_until(WAIT, "per-pane status subscription", || {
+        server.requests_for("events.subscribe").iter().any(|req| {
+            req.params["subscriptions"].as_array().is_some_and(|subs| {
+                subs.iter()
+                    .any(|s| s["type"] == "pane.agent_status_changed" && s["pane_id"] == pane)
+            })
+        })
+    })
+}
+
 fn agent_json(cwd: &std::path::Path, status: &str) -> Value {
     agent_json_on(cwd, status, "w1:p1", "term_a", "builder")
 }
@@ -129,20 +146,31 @@ fn daemon_snapshot_subscribes_status_events_and_delivers() {
     );
 
     // 2. events.subscribe issued with a per-pane status subscription.
+    // The first subscribe goes out before the snapshot sync populates
+    // the watched set; a resubscribe with the per-pane filter follows.
     assert!(
-        wait_until(WAIT, "events.subscribe", || {
-            !server.requests_for("events.subscribe").is_empty()
+        wait_until(WAIT, "per-pane status subscription", || {
+            server.requests_for("events.subscribe").iter().any(|req| {
+                req.params["subscriptions"].as_array().is_some_and(|subs| {
+                    subs.iter().any(|s| {
+                        s["type"] == "pane.agent_status_changed" && s["pane_id"] == "w1:p1"
+                    })
+                })
+            })
         }),
-        "expected events.subscribe"
+        "expected events.subscribe with per-pane status subscription"
     );
-    let subs_req = server.last_request_for("events.subscribe").unwrap();
+    let subs_req = server
+        .requests_for("events.subscribe")
+        .into_iter()
+        .find(|req| {
+            req.params["subscriptions"].as_array().is_some_and(|subs| {
+                subs.iter()
+                    .any(|s| s["type"] == "pane.agent_status_changed" && s["pane_id"] == "w1:p1")
+            })
+        })
+        .unwrap();
     let subscriptions = subs_req.params["subscriptions"].as_array().unwrap();
-    assert!(
-        subscriptions
-            .iter()
-            .any(|s| { s["type"] == "pane.agent_status_changed" && s["pane_id"] == "w1:p1" }),
-        "missing per-pane status subscription: {subscriptions:?}"
-    );
     for expected in [
         "pane.agent_detected",
         "pane.moved",
@@ -310,6 +338,9 @@ fn pane_exited_marks_agent_offline_and_resubscribes() {
     let subscribes_before = server.requests_for("events.subscribe").len();
 
     // Lifecycle event (snake_case) broadcast on the subscription stream.
+    // Wait for the resubscribe carrying the per-pane filter so the frame
+    // is not dropped on the stale subscription.
+    assert!(wait_for_status_subscription(&server, "w1:p1"));
     server.push_event(json!({
         "event": "pane_exited",
         "data": {
@@ -398,6 +429,7 @@ fn delivery_worker_blocked_backoff_is_recorded() {
     let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = DeliveryWorker::new(
+        Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
         client,
         pools,
         shutdown,
@@ -456,6 +488,7 @@ fn delivery_worker_defers_not_ready_recipient_without_prompting() {
     let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = DeliveryWorker::new(
+        Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
         client,
         pools,
         shutdown,
@@ -529,6 +562,7 @@ fn delivery_worker_blocked_creates_rescue_job_and_dispatches_helper() {
     let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = DeliveryWorker::new(
+        Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
         client,
         pools,
         shutdown,
@@ -646,6 +680,7 @@ fn rescue_dispatches_multiple_blocked_agents_to_distinct_helpers() {
     let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = DeliveryWorker::new(
+        Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
         client,
         pools,
         shutdown,
@@ -732,6 +767,7 @@ fn rescue_without_helper_stays_pending() {
     let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = DeliveryWorker::new(
+        Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
         client,
         pools,
         shutdown,
@@ -809,6 +845,7 @@ fn rescue_ambiguous_dispatch_holds_assignment_then_redispatches_fresh_token() {
     let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = DeliveryWorker::new(
+        Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
         client,
         pools,
         shutdown,
@@ -893,6 +930,7 @@ fn delivery_worker_notifies_on_delivery_when_enabled() {
     let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = DeliveryWorker::new(
+        Arc::new(herdr_runtime::HerdrRuntime::new(client.clone())),
         client,
         pools,
         shutdown,
@@ -918,13 +956,16 @@ fn agent_scope_move_retires_stale_record() {
     let dir_b = tempfile::tempdir().unwrap();
 
     let client = herdr_protocol::HerdrClient::from_socket_path(server.socket_path());
+    let runtime = herdr_runtime::HerdrRuntime::new(client.clone());
     let pools = Arc::new(Pools::open(state.path()).unwrap());
-    let mut sync = herdr_router::RegistrySync::new(&client, pools.as_ref(), true);
+    let mut sync = herdr_router::RegistrySync::new(&runtime, pools.as_ref(), true);
 
-    // Bootstrap: agent lives in scope A.
-    server
-        .on("session.snapshot")
-        .respond(snapshot_result(vec![agent_json(dir_a.path(), "idle")]));
+    // Bootstrap: agent lives in scope A. `sync_snapshot` lists via
+    // `agent.list` (the runtime trait has no session.snapshot call).
+    server.on("agent.list").respond(json!({
+        "type": "agent_list",
+        "agents": [agent_json(dir_a.path(), "idle")],
+    }));
     assert_eq!(sync.sync_snapshot().unwrap(), 1);
 
     let live_in = |pools: &Pools| -> Vec<(String, String)> {
@@ -974,38 +1015,33 @@ fn dead_watched_pane_is_evicted_and_subscribe_recovers() {
         agent_json(project.path(), "idle"),
         agent_json_on(project.path(), "idle", "w1:pGONE", "term_ghost", "ghost"),
     ]));
-    server.fail_next(
-        "events.subscribe",
-        "pane_not_found",
-        "pane w1:pGONE not found",
-    );
+    // The first subscribe goes out before the snapshot sync populates
+    // the watched set; the second carries both panes and is the one the
+    // server rejects. Later subscribes fall back to the canned default.
+    server
+        .on("events.subscribe")
+        .respond_and_hold(herdr_testkit::canned_result("subscription_started"))
+        .error("pane_not_found", "pane w1:pGONE not found");
 
     let daemon = Arc::new(Daemon::new(test_config(state.path(), server.socket_path())).unwrap());
     let handle = daemon.spawn().unwrap();
 
-    // The failed subscribe is retried without the dead pane.
+    // The failed subscribe is retried without the dead pane. The first
+    // subscribe goes out before the snapshot sync populates the watched
+    // set, so the assertion waits for the post-eviction resubscribe.
     assert!(
-        wait_until(WAIT, "events.subscribe retry", || {
-            server.requests_for("events.subscribe").len() >= 2
+        wait_until(WAIT, "events.subscribe retry without dead pane", || {
+            server.requests_for("events.subscribe").iter().any(|req| {
+                let Some(subs) = req.params["subscriptions"].as_array() else {
+                    return false;
+                };
+                subs.iter()
+                    .any(|s| s["type"] == "pane.agent_status_changed" && s["pane_id"] == "w1:p1")
+                    && !subs.iter().any(|s| s["pane_id"] == "w1:pGONE")
+            })
         }),
-        "expected events.subscribe to be retried after pane_not_found"
+        "expected events.subscribe retried without the dead pane"
     );
-    let last = server
-        .requests_for("events.subscribe")
-        .into_iter()
-        .last()
-        .unwrap();
-    let subs = last.params["subscriptions"].as_array().unwrap();
-    assert!(
-        subs.iter()
-            .any(|s| s["type"] == "pane.agent_status_changed" && s["pane_id"] == "w1:p1"),
-        "live pane missing from resubscribe: {subs:?}"
-    );
-    assert!(
-        !subs.iter().any(|s| s["pane_id"] == "w1:pGONE"),
-        "dead pane still subscribed: {subs:?}"
-    );
-
     // The ghost record is offline; the live agent is untouched.
     let agents = daemon.pools().all()[0]
         .registry()

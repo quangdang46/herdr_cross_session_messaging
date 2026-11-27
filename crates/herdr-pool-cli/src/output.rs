@@ -159,8 +159,8 @@ pub struct ThreadSummaryJson {
 pub struct WhoamiJson {
     pub agent_id: String,
     pub pane_id: String,
-    pub workspace_id: String,
-    pub tab_id: String,
+    pub workspace_id: Option<String>,
+    pub tab_id: Option<String>,
     pub agent_kind: Option<String>,
     pub name: Option<String>,
     pub scope_key: String,
