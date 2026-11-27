@@ -9,6 +9,7 @@ members = [
     "crates/herdr-router",
     "crates/herdr-pool-cli",
     "crates/herdr-routerd",
+    "crates/hc-spike",
 ]
 
 [workspace.package]

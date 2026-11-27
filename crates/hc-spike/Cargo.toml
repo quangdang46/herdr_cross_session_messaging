@@ -1,0 +1,12 @@
+[package]
+name = "hc-spike"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Spike: synchronous hc/herdr-core JSON-RPC client over `hc connect`"
+
+[dependencies]
+serde_json = "1"
+thiserror = "1"

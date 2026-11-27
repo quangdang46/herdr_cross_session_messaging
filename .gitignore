@@ -9,3 +9,5 @@
 # Installer-generated skill copies (source of truth: skills/herdr-messaging/)
 .claude/skills/herdr-messaging/
 .agents/skills/herdr-messaging/
+.herdcluster/
+.omo/
