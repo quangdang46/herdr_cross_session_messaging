@@ -440,6 +440,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "herdr-runtime"
+version = "0.1.0"
+dependencies = [
+ "herdr-protocol",
+ "herdr-testkit",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "herdr-testkit"
 version = "0.1.0"
 dependencies = [

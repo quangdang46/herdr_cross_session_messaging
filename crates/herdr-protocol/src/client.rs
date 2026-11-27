@@ -34,8 +34,11 @@ pub const SESSION_ENV_VAR: &str = "HERDR_SESSION";
 pub const DEFAULT_SESSION_NAME: &str = "default";
 
 /// A bidirectional byte stream to the Herdr server.
-trait Conn: Read + Write {}
-impl<T: Read + Write> Conn for T {}
+///
+/// `Send` is required so `SubscriptionStream` can move to a reader thread
+/// (the runtime abstraction's `subscribe_events` does exactly that).
+trait Conn: Read + Write + Send {}
+impl<T: Read + Write + Send> Conn for T {}
 type BoxConn = Box<dyn Conn>;
 
 /// Open a connection to `path`, applying the client's configured timeouts.
