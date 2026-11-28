@@ -118,17 +118,29 @@ pub enum InstallMode {
     Uninstall,
 }
 
+/// Issue tracker for bug reports — appended to runtime (exit-1) failures
+/// so agents that hit a herdr-pool bug know where to file it.
+const ISSUE_URL: &str = "https://github.com/quangdang46/herdr_cross_session_messaging/issues";
+
 /// Render a failure on stderr — or as a JSON error object under `--json`.
+/// Runtime failures (exit 1) also carry a bug-report pointer; usage
+/// failures (exit 2: bad args, unknown peer, missing env) do not.
 fn emit_failure(globals: &cli::Globals, failure: &Failure) {
+    let reportable = failure.code == 1;
     if globals.json {
-        let payload = serde_json::json!({
-            "error": {
-                "kind": failure.kind,
-                "message": failure.message,
-            }
+        let mut error = serde_json::json!({
+            "kind": failure.kind,
+            "message": failure.message,
         });
+        if reportable {
+            error["report_url"] = serde_json::Value::String(ISSUE_URL.to_string());
+        }
+        let payload = serde_json::json!({ "error": error });
         println!("{}", serde_json::to_string(&payload).unwrap_or_default());
     } else {
         eprintln!("herdr-pool: {}", failure.message);
+    }
+    if reportable {
+        eprintln!("note: if this looks like a herdr-pool bug, file an issue: {ISSUE_URL}");
     }
 }
