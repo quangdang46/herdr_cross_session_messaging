@@ -1,6 +1,6 @@
 id = "herdr.cross-session-messaging"
 name = "Cross-Session Messaging"
-version = "0.2.0"
+version = "0.2.1"
 min_herdr_version = "0.9.0"
 description = "Peer-to-peer messaging layer for coding agents in Herdr (project-scoped pools, herdr-pool CLI, agent skills)."
 # Windows is excluded: the Herdr socket transport there is a named pipe,
