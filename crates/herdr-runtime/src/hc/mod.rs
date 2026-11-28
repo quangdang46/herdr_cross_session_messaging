@@ -73,6 +73,18 @@ const CALLER_PREFIX: &str = "herdr-pool";
 /// launch-pending for this long after first observation (RFC §6.2).
 const LAUNCH_PENDING_WINDOW: Duration = Duration::from_secs(10);
 
+/// Boot grace before a *non-reporting* agent terminal becomes
+/// prompt-ready: agent CLIs without OSC-7501 (devin, opencode) give no
+/// readiness signal, so a live terminal with a non-shell kind is treated
+/// as ready once observed this long. Shells are never ready — typing a
+/// pool message into a bare shell would execute it.
+const NONREPORT_READY_GRACE: Duration = Duration::from_secs(30);
+
+/// Foreground/kind names that are shells, not agent CLIs.
+const SHELL_KINDS: &[&str] = &[
+    "sh", "bash", "zsh", "fish", "dash", "ash", "tcsh", "ksh", "nu", "xonsh", "elvish",
+];
+
 /// Backoff between `terminal.wait` check-ins when the ended status does
 /// not satisfy `WaitRequest::until` (hc waits can't filter by status, so
 /// mismatches re-poll).
@@ -243,16 +255,38 @@ fn note_seen(first_seen: &Mutex<HashMap<String, Instant>>, address: &str) -> Opt
     Some(entry.elapsed())
 }
 
+/// Prompt-readiness for one terminal.
+///
+/// Reporting terminals (OSC-7501) are ready whenever live — their status
+/// carries blocked/working semantics the delivery worker maps onto
+/// defer/retry. Non-reporting terminals become ready after
+/// [`NONREPORT_READY_GRACE`] — but only for non-shell kinds, so a bare
+/// shell never receives prompt text. Unknown kind stays unready.
+fn prompt_ready(
+    live: bool,
+    reported: bool,
+    kind: Option<&str>,
+    observed_age: Option<Duration>,
+) -> bool {
+    if !live {
+        return false;
+    }
+    if reported {
+        return true;
+    }
+    let non_shell = kind.map(|k| !SHELL_KINDS.contains(&k)).unwrap_or(false);
+    non_shell
+        && observed_age
+            .map(|age| age >= NONREPORT_READY_GRACE)
+            .unwrap_or(false)
+}
+
 /// Map a wire [`Terminal`] into [`RuntimeAgent`]. `first_seen` feeds the
 /// `launch_pending` heuristic (live + never-reported + < 10 s old).
 fn terminal_agent(t: &Terminal, first_seen: &Mutex<HashMap<String, Instant>>) -> RuntimeAgent {
     let live = t.state == "live";
     let reported = has_reported(t);
-    let launch_pending = live
-        && !reported
-        && note_seen(first_seen, &t.address)
-            .map(|age| age < LAUNCH_PENDING_WINDOW)
-            .unwrap_or(false);
+    let observed_age = note_seen(first_seen, &t.address);
 
     // Pool-facing name: herdr-pool.name label > terminal name.
     let name = t
@@ -281,6 +315,13 @@ fn terminal_agent(t: &Terminal, first_seen: &Mutex<HashMap<String, Instant>>) ->
                 .and_then(|a| std::path::Path::new(a).file_name())
                 .map(|n| n.to_string_lossy().into_owned())
         });
+
+    let launch_pending = live
+        && !reported
+        && observed_age
+            .map(|age| age < LAUNCH_PENDING_WINDOW)
+            .unwrap_or(false);
+    let interactive_ready = prompt_ready(live, reported, kind.as_deref(), observed_age);
 
     let mut extra = t.labels.clone();
     if let Some(s) = &t.status {
@@ -314,7 +355,7 @@ fn terminal_agent(t: &Terminal, first_seen: &Mutex<HashMap<String, Instant>>) ->
         } else {
             RuntimeStatus::Offline
         },
-        interactive_ready: live && reported,
+        interactive_ready,
         launch_pending,
         extra,
     }
@@ -690,5 +731,35 @@ impl AgentRuntime for HcRuntime {
             // terminal.* call and events.subscribe spans machines.
             cross_machine: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_ready_reporting_terminal_is_ready_when_live() {
+        assert!(prompt_ready(true, true, Some("claude"), None));
+        assert!(!prompt_ready(false, true, Some("claude"), None));
+    }
+
+    #[test]
+    fn prompt_ready_nonreporting_needs_grace_and_non_shell_kind() {
+        let young = Some(Duration::from_secs(5));
+        let old = Some(NONREPORT_READY_GRACE + Duration::from_secs(1));
+        // Too young — still booting.
+        assert!(!prompt_ready(true, false, Some("devin"), young));
+        // Past grace, agent kind — ready.
+        assert!(prompt_ready(true, false, Some("devin"), old));
+        assert!(prompt_ready(true, false, Some("opencode"), old));
+        // Shells never become ready, even past grace.
+        for sh in SHELL_KINDS {
+            assert!(!prompt_ready(true, false, Some(sh), old), "kind {sh}");
+        }
+        // Unknown kind stays unready.
+        assert!(!prompt_ready(true, false, None, old));
+        // Missing age stays unready.
+        assert!(!prompt_ready(true, false, Some("devin"), None));
     }
 }
