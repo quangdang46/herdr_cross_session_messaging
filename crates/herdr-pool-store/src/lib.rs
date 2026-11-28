@@ -23,4 +23,4 @@ pub use error::{Result, StoreError};
 pub use pool::{PoolStore, PruneReport, ScopeEntry, ScopeIndex};
 pub use registry::{new_agent_id, AgentRecord, RegistryStore, STATUS_OFFLINE};
 pub use rescue::{new_rescue_id, HelperReport, RescueJob, RescueStatus, RescueStore};
-pub use store::{Message, MessageStatus, MessageStore, Thread, MAX_DELIVERY_ATTEMPTS};
+pub use store::{Message, MessageStatus, MessageStore, NudgeRecord, Thread, MAX_DELIVERY_ATTEMPTS};

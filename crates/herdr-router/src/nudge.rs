@@ -9,12 +9,22 @@
 //! proactively continue the conversation.
 //!
 //! A nudge is a router-generated prompt — never a stored pool message, so
-//! it cannot itself trigger further nudges or pollute threads. Per-message
-//! reminders are throttled to one per [`NUDGE_REPEAT`] per daemon run;
-//! delivery honors the same readiness gates as the outbox worker
+//! it cannot itself trigger further nudges or pollute threads. Reminders
+//! are bounded three ways so a busy recipient is never spammed:
+//!
+//! - at most [`NUDGE_MAX_PER_MESSAGE`] reminders per message, ever —
+//!   persisted in `message_nudges`, so daemon restarts do not reset the
+//!   count (ack/FYI mail that legitimately never gets a reply stops being
+//!   nudged after the cap instead of every [`NUDGE_REPEAT`] forever);
+//! - at most [`NUDGE_PER_SWEEP_PER_RECIPIENT`] reminders per recipient per
+//!   sweep, so a large backlog drains gradually instead of arriving as one
+//!   burst of prompts;
+//! - repeat reminders for the same message are spaced by [`NUDGE_REPEAT`].
+//!
+//! Delivery honors the same readiness gates as the outbox worker
 //! (`interactive_ready`, `launch_pending`, offline, blocked).
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -36,9 +46,13 @@ pub const NUDGE_REPEAT: Duration = Duration::from_secs(30 * 60);
 /// nudge scan is deliberately much slower — it is a background courtesy,
 /// not part of the delivery path).
 pub const NUDGE_SCAN_INTERVAL: Duration = Duration::from_secs(60);
-/// Nudged-message bookkeeping is pruned past this age so the map cannot
-/// grow without bound over a long daemon run.
-const NUDGE_BOOKKEEPING_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Maximum reminders sent for one message, ever. `HERDR_POOL_NUDGE_MAX`
+/// overrides (whole count; `0` disables nudging entirely).
+pub const NUDGE_MAX_PER_MESSAGE: i64 = 3;
+/// Maximum reminders delivered to one recipient per sweep — bounds the
+/// burst when many threads become eligible at once. `HERDR_POOL_NUDGE_PER_SWEEP`
+/// overrides.
+pub const NUDGE_PER_SWEEP_PER_RECIPIENT: usize = 2;
 
 fn env_flag_disabled(var: &str) -> bool {
     std::env::var(var)
@@ -60,18 +74,33 @@ fn env_minutes(var: &str, default: Duration) -> Duration {
         .unwrap_or(default)
 }
 
+fn env_usize(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn env_i64(var: &str, default: i64) -> i64 {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(default)
+}
+
 /// Periodic unanswered-mail reminder sweeper. Single-threaded by design —
-/// owned by the delivery worker thread.
+/// owned by the delivery worker thread. Per-message state lives in the
+/// pool db (`message_nudges`), not in memory.
 pub struct NudgeManager {
     runtime: Arc<dyn AgentRuntime>,
     pools: Arc<Pools>,
     enabled: bool,
     after: Duration,
     repeat: Duration,
+    max_per_message: i64,
+    per_sweep_per_recipient: usize,
     /// Last scan start; `None` until the first sweep.
     last_scan: Cell<Option<Instant>>,
-    /// `scope_key/msg_id` → last nudge time (per daemon run).
-    nudged: RefCell<HashMap<String, Instant>>,
 }
 
 impl NudgeManager {
@@ -82,8 +111,12 @@ impl NudgeManager {
             enabled: !env_flag_disabled("HERDR_POOL_NUDGE"),
             after: env_minutes("HERDR_POOL_NUDGE_MINUTES", NUDGE_AFTER),
             repeat: NUDGE_REPEAT,
+            max_per_message: env_i64("HERDR_POOL_NUDGE_MAX", NUDGE_MAX_PER_MESSAGE),
+            per_sweep_per_recipient: env_usize(
+                "HERDR_POOL_NUDGE_PER_SWEEP",
+                NUDGE_PER_SWEEP_PER_RECIPIENT,
+            ),
             last_scan: Cell::new(None),
-            nudged: RefCell::new(HashMap::new()),
         }
     }
 
@@ -91,6 +124,13 @@ impl NudgeManager {
     pub fn with_timings(mut self, after: Duration, repeat: Duration) -> Self {
         self.after = after;
         self.repeat = repeat;
+        self
+    }
+
+    /// Override the per-message cap / per-sweep per-recipient cap (tests).
+    pub fn with_limits(mut self, max_per_message: i64, per_sweep: usize) -> Self {
+        self.max_per_message = max_per_message;
+        self.per_sweep_per_recipient = per_sweep;
         self
     }
 
@@ -103,7 +143,7 @@ impl NudgeManager {
     /// One throttled sweep across every known pool. Cheap no-ops when
     /// disabled, inside the scan interval, or when nothing qualifies.
     pub fn sweep(&self) {
-        if !self.enabled {
+        if !self.enabled || self.max_per_message <= 0 {
             return;
         }
         let now = Instant::now();
@@ -113,7 +153,6 @@ impl NudgeManager {
             }
         }
         self.last_scan.set(Some(now));
-        self.prune_bookkeeping(now);
 
         let cutoff = now_millis().saturating_sub(self.after.as_millis() as i64);
         for pool in self.pools.all() {
@@ -126,40 +165,63 @@ impl NudgeManager {
                 }
             };
             // Only the newest unanswered message per (thread, recipient)
-            // is worth a reminder — older ones are covered by it.
-            for msg in latest_per_thread(candidates) {
-                self.maybe_nudge(pool.as_ref(), &msg, now);
+            // is worth a reminder — older ones are covered by it. Sort
+            // oldest-first so the per-recipient sweep cap drains the
+            // backlog in a stable order.
+            let mut candidates = latest_per_thread(candidates);
+            candidates.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+
+            // Successful reminders sent per recipient this sweep.
+            let mut sent: HashMap<String, usize> = HashMap::new();
+            for msg in &candidates {
+                if sent.get(&msg.to_agent).copied().unwrap_or(0) >= self.per_sweep_per_recipient {
+                    continue;
+                }
+                if self.maybe_nudge(pool.as_ref(), &messages, msg) {
+                    *sent.entry(msg.to_agent.clone()).or_insert(0) += 1;
+                }
             }
         }
     }
 
-    /// Send the reminder for one candidate, honoring the per-message
-    /// throttle and the recipient's current readiness.
-    fn maybe_nudge(&self, pool: &herdr_pool_store::PoolStore, msg: &Message, now: Instant) {
-        let key = format!("{}/{}", pool.scope_key(), msg.id);
-        {
-            let nudged = self.nudged.borrow();
-            if nudged
-                .get(&key)
-                .is_some_and(|t| now.duration_since(*t) < self.repeat)
-            {
-                return;
+    /// Send the reminder for one candidate if it is due: under the
+    /// per-message cap, past the repeat interval, and the recipient is
+    /// ready. Returns `true` when a reminder prompt was delivered.
+    fn maybe_nudge(
+        &self,
+        pool: &herdr_pool_store::PoolStore,
+        messages: &herdr_pool_store::MessageStore<'_>,
+        msg: &Message,
+    ) -> bool {
+        let now_ms = now_millis();
+        match messages.nudge_state(&msg.id) {
+            Ok(Some(state)) => {
+                if state.count >= self.max_per_message
+                    || now_ms.saturating_sub(state.last_nudge_at) < self.repeat.as_millis() as i64
+                {
+                    return false;
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::debug!(message = %msg.id, error = %err, "nudge_state failed");
+                return false;
             }
         }
 
         let registry = pool.registry();
         let recipient = match registry.get_agent(&msg.to_agent) {
             Ok(Some(r)) => r,
-            _ => return,
+            _ => return false,
         };
         if recipient.status == STATUS_OFFLINE
             || !recipient.interactive_ready
             || recipient.launch_pending
         {
-            return;
+            return false;
         }
         let Some(target) = prompt_target(&recipient) else {
-            return;
+            return false;
         };
         let sender = registry.get_agent(&msg.from_agent).ok().flatten();
 
@@ -168,30 +230,30 @@ impl NudgeManager {
             .send_prompt(&target, &nudge_envelope(msg, sender.as_ref()))
         {
             Ok(SendOutcome::Delivered { .. }) => {
-                self.nudged.borrow_mut().insert(key, now);
+                if let Err(err) = messages.record_nudge(&msg.id, now_ms) {
+                    tracing::debug!(message = %msg.id, error = %err, "record_nudge failed");
+                }
                 tracing::info!(
                     message = %msg.id,
                     to = %msg.to_agent,
                     "sent unanswered-message reminder"
                 );
+                true
             }
             Ok(SendOutcome::Deferred { .. }) => {
                 // Busy or mid-launch: skip quietly; the next scan retries.
                 tracing::debug!(message = %msg.id, "nudge deferred");
+                false
             }
             Ok(SendOutcome::Failed { message, .. }) => {
                 tracing::debug!(message = %msg.id, error = %message, "nudge prompt failed");
+                false
             }
             Err(err) => {
                 tracing::debug!(message = %msg.id, error = %err, "nudge prompt failed");
+                false
             }
         }
-    }
-
-    /// Drop bookkeeping for messages older than [`NUDGE_BOOKKEEPING_TTL`].
-    fn prune_bookkeeping(&self, now: Instant) {
-        let mut nudged = self.nudged.borrow_mut();
-        nudged.retain(|_, t| now.duration_since(*t) < NUDGE_BOOKKEEPING_TTL);
     }
 }
 

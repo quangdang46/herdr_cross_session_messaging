@@ -17,6 +17,7 @@ const V2_SQL: &str = include_str!("../migrations/V2__rescue.sql");
 const V3_SQL: &str = include_str!("../migrations/V3__rescue_captured_at.sql");
 const V4_SQL: &str = include_str!("../migrations/V4__rescue_dispatch_token.sql");
 const V5_SQL: &str = include_str!("../migrations/V5__agent_readiness.sql");
+const V6_SQL: &str = include_str!("../migrations/V6__message_nudges.sql");
 
 struct Migration {
     version: i64,
@@ -44,6 +45,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 5,
         sql: V5_SQL,
+    },
+    Migration {
+        version: 6,
+        sql: V6_SQL,
     },
 ];
 

@@ -240,6 +240,15 @@ const MESSAGE_COLUMNS: &str =
 
 const THREAD_COLUMNS: &str = "thread_id, scope_key, subject, created_at, last_activity_at";
 
+/// Persisted unanswered-mail reminder bookkeeping for one message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NudgeRecord {
+    /// How many reminder prompts have been delivered for this message.
+    pub count: i64,
+    /// `last_nudge_at` — unix epoch milliseconds.
+    pub last_nudge_at: i64,
+}
+
 /// Scoped repository over the `messages` and `threads` tables of one pool db.
 ///
 /// Cheap to construct (`MessageStore::from(&pool)`-style borrow); all state
@@ -527,6 +536,42 @@ impl<'a> MessageStore<'a> {
             .query_map(params![cutoff_ms], message_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    // ----- nudge bookkeeping ------------------------------------------------
+
+    /// Persisted reminder state for one message, if it has ever been nudged.
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
+    pub fn nudge_state(&self, message_id: &str) -> Result<Option<NudgeRecord>> {
+        let conn = self.pool.conn();
+        let row = conn
+            .query_row(
+                "SELECT nudge_count, last_nudge_at FROM message_nudges WHERE message_id = ?1",
+                params![message_id],
+                |row| {
+                    Ok(NudgeRecord {
+                        count: row.get("nudge_count")?,
+                        last_nudge_at: row.get("last_nudge_at")?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Record that a reminder prompt was delivered for `message_id`:
+    /// increments `nudge_count` and stamps `last_nudge_at` (unix millis).
+    #[tracing::instrument(skip_all, name = "store.query", level = "debug", fields(scope_key = %self.pool.scope_key()))]
+    pub fn record_nudge(&self, message_id: &str, now_ms: i64) -> Result<()> {
+        let conn = self.pool.conn();
+        conn.execute(
+            "INSERT INTO message_nudges (message_id, nudge_count, last_nudge_at) \
+             VALUES (?1, 1, ?2) \
+             ON CONFLICT(message_id) DO UPDATE SET \
+             nudge_count = nudge_count + 1, last_nudge_at = excluded.last_nudge_at",
+            params![message_id, now_ms],
+        )?;
+        Ok(())
     }
 
     // ----- status transitions ----------------------------------------------

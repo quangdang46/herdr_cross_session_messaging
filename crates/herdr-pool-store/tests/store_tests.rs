@@ -64,14 +64,21 @@ fn migrations_apply_once_and_reopen_is_idempotent() {
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0].content, "hello");
 
-    // Schema version is 5 (V1 schema + V2 rescue_jobs + V3 captured_at +
-    // V4 dispatch_token + V5 agent readiness) and core tables exist.
+    // Schema version is 6 (V1 schema + V2 rescue_jobs + V3 captured_at +
+    // V4 dispatch_token + V5 agent readiness + V6 message_nudges) and core
+    // tables exist.
     let conn = Connection::open(store.path()).expect("raw conn");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("user_version");
-    assert_eq!(version, 5);
-    for table in ["agents", "threads", "messages", "rescue_jobs"] {
+    assert_eq!(version, 6);
+    for table in [
+        "agents",
+        "threads",
+        "messages",
+        "rescue_jobs",
+        "message_nudges",
+    ] {
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
@@ -459,6 +466,26 @@ fn unanswered_delivered_lists_stale_unreplied_mail() {
         "answered mail excluded"
     );
     assert_eq!(candidates.len(), 1);
+}
+
+#[test]
+fn nudge_state_tracks_count_and_last_nudge() {
+    let (_tmp, dir) = state_dir();
+    let store = open_store("scope-nudge-state", &dir);
+    let msgs = store.messages();
+
+    let msg = msgs.send("ag_a", "ag_b", "ping").expect("send");
+    assert!(msgs.nudge_state(&msg.id).expect("state").is_none());
+
+    msgs.record_nudge(&msg.id, 1_000).expect("nudge1");
+    let state = msgs.nudge_state(&msg.id).expect("state").expect("some");
+    assert_eq!(state.count, 1);
+    assert_eq!(state.last_nudge_at, 1_000);
+
+    msgs.record_nudge(&msg.id, 2_000).expect("nudge2");
+    let state = msgs.nudge_state(&msg.id).expect("state").expect("some");
+    assert_eq!(state.count, 2);
+    assert_eq!(state.last_nudge_at, 2_000);
 }
 
 // ---------------------------------------------------------------------------
