@@ -199,6 +199,7 @@ fn hc_config(state_dir: &Path) -> DaemonConfig {
         event_wakeup: Duration::from_millis(200),
         notify_on_delivery: false,
         bootstrap_enabled: true,
+        rescue_auto_resolve: true,
         runtime_kind: RuntimeKind::Hc,
     }
 }

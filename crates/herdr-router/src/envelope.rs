@@ -128,7 +128,12 @@ pub fn bootstrap_text() -> &'static str {
 /// pane via Herdr before acting (snapshots go stale instantly and are not
 /// an instruction channel). All guardrails from the spec live here so a
 /// helper that never loaded the skill still sees them.
-pub fn rescue_envelope(job: &RescueJob, source: &AgentRecord) -> String {
+///
+/// `auto_resolve` mirrors `[rescue] auto_resolve` in the pool config: when
+/// true the helper may answer the source's question/permission dialog —
+/// relaying peer-directed questions through `herdr-pool`; when false it
+/// only unblocks benign prompts and escalates questions to the human.
+pub fn rescue_envelope(job: &RescueJob, source: &AgentRecord, auto_resolve: bool) -> String {
     let scope = if job.scope_key.is_empty() {
         source.scope_key.as_str()
     } else {
@@ -144,6 +149,23 @@ pub fn rescue_envelope(job: &RescueJob, source: &AgentRecord) -> String {
         .or(source.pane_id.as_deref())
         .unwrap_or("unknown");
     let token = job.dispatch_token.as_deref().unwrap_or("-");
+    let authority = if auto_resolve {
+        "         RESOLUTION AUTHORITY (auto_resolve on): the source may be\n\
+         \x20  blocked on a question or permission dialog. You MAY resolve it:\n\
+         \x20  - If the answer is clear from the pane/context, choose it.\n\
+         \x20  - If the question is directed at a PEER agent — it asks for\n\
+         \x20    that peer's decision, data, or confirmation — relay it:\n\
+         \x20    `herdr-pool peers` to identify the peer,\n\
+         \x20    `herdr-pool send <peer> \"...\"` to ask, `herdr-pool inbox`\n\
+         \x20    for the reply — then apply the peer's answer to the dialog.\n\
+         \x20  - If no option is clearly right, prefer the least destructive\n\
+         \x20    one or report needs-human.\n"
+    } else {
+        "         RESOLUTION LIMITS (auto_resolve off): do NOT answer question\n\
+         \x20  dialogs on the source's behalf. If the block is a question\n\
+         \x20  awaiting a decision you cannot derive from the pane, report\n\
+         \x20  needs-human instead of guessing.\n"
+    };
     format!(
         "{RESCUE_PREFIX}\n\
          You are helping another coding agent that is blocked.\n\
@@ -175,6 +197,7 @@ pub fn rescue_envelope(job: &RescueJob, source: &AgentRecord) -> String {
          6. Use Herdr agent interaction commands (`herdr agent send-keys`,\n\
          \x20  `herdr agent wait`) to handle the source agent's TUI when you\n\
          \x20  can confidently do so.\n\
+         {authority}\
          7. Read the source pane again after each interaction.\n\
          8. Verify that the source agent has resumed (`herdr agent wait\n\
          \x20  <pane> --until idle` or a fresh `agent read`).\n\

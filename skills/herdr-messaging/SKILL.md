@@ -134,6 +134,16 @@ Workflow:
 3. **Decide.** Understand what the source agent is asking or stuck on. If it
    is a question you can answer confidently, an option selection, or a
    benign confirmation, plan the minimal interaction.
+
+   When the rescue prompt carries a `RESOLUTION AUTHORITY (auto_resolve on)`
+   section, you may also resolve question/permission dialogs on the source's
+   behalf. If the question is directed at a **peer** — it asks for that
+   peer's decision, data, or confirmation — relay it through the pool:
+   `herdr-pool peers` to identify the peer, `herdr-pool send <peer> "..."`
+   to ask, `herdr-pool inbox` for the reply — then apply the peer's answer
+   to the dialog. When the prompt instead says `RESOLUTION LIMITS
+   (auto_resolve off)`, do not answer question dialogs; escalate
+   `needs-human` when the answer is not derivable from the pane.
 4. **Interact** with the SOURCE pane only:
 
    ```sh

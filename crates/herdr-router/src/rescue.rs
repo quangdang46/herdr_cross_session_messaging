@@ -87,6 +87,10 @@ pub struct RescueManager {
     /// crashed-between-assign-and-prompt (or an ambiguous dispatch whose
     /// helper never claimed) and returned to `pending`.
     assigned_stale: Duration,
+    /// `[rescue] auto_resolve`: helpers may answer the source's
+    /// question/permission dialog (relaying peer-directed questions via
+    /// the pool). Off → helpers only unblock benign prompts.
+    auto_resolve: bool,
 }
 
 impl RescueManager {
@@ -99,6 +103,7 @@ impl RescueManager {
             failed_helpers: Mutex::new(HashMap::new()),
             seen_unblocked_at: Mutex::new(HashMap::new()),
             assigned_stale: RESCUE_ASSIGNED_STALE,
+            auto_resolve: true,
         }
     }
 
@@ -115,6 +120,12 @@ impl RescueManager {
     /// Override the stale-`assigned` threshold (tests).
     pub fn set_assigned_stale(&mut self, stale: Duration) {
         self.assigned_stale = stale;
+    }
+
+    /// Set whether helpers may resolve question dialogs (`[rescue]
+    /// auto_resolve` / `HERDR_POOL_RESCUE_AUTO_RESOLVE`).
+    pub fn set_auto_resolve(&mut self, enabled: bool) {
+        self.auto_resolve = enabled;
     }
 
     /// Ensure an open rescue job exists for `source` (a blocked agent).
@@ -398,7 +409,7 @@ impl RescueManager {
         prompt_job.helper_agent_id = Some(helper.agent_id.clone());
         prompt_job.helper_pane_id = helper.pane_id.clone();
         prompt_job.dispatch_token = Some(token);
-        let text = rescue_envelope(&prompt_job, source);
+        let text = rescue_envelope(&prompt_job, source, self.auto_resolve);
 
         match self.client.agent_prompt(&helper_target, &text, None) {
             Ok(_) => {

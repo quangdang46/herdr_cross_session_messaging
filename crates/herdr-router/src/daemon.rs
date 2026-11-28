@@ -98,6 +98,11 @@ pub struct DaemonConfig {
     /// Auto-send the `[herdr-pool] bootstrap` prompt to new agents
     /// (`[bootstrap] enabled` in config.toml / `HERDR_POOL_BOOTSTRAP`).
     pub bootstrap_enabled: bool,
+    /// Let rescue helpers resolve blocked agents' question dialogs,
+    /// relaying peer-directed questions through the pool
+    /// (`[rescue] auto_resolve` in config.toml /
+    /// `HERDR_POOL_RESCUE_AUTO_RESOLVE`).
+    pub rescue_auto_resolve: bool,
     /// Agent runtime backend (`HERDR_POOL_RUNTIME`, default `herdr`).
     /// Both backends coexist during the hc migration; the CLI must select
     /// the same value or delivery state can diverge.
@@ -115,6 +120,7 @@ impl DaemonConfig {
             event_wakeup: EVENT_WAKEUP,
             notify_on_delivery: false,
             bootstrap_enabled: true,
+            rescue_auto_resolve: true,
             runtime_kind: RuntimeKind::Herdr,
         }
     }
@@ -132,7 +138,9 @@ impl DaemonConfig {
         config.notify_on_delivery = std::env::var("HERDR_POOL_NOTIFY_DELIVERY")
             .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
             .unwrap_or(false);
-        config.bootstrap_enabled = herdr_plugin::config::PoolConfig::load().bootstrap_enabled;
+        let pool_config = herdr_plugin::config::PoolConfig::load();
+        config.bootstrap_enabled = pool_config.bootstrap_enabled;
+        config.rescue_auto_resolve = pool_config.rescue_auto_resolve;
         config.runtime_kind = herdr_runtime::runtime_kind_from_env(&|key| std::env::var_os(key))
             .map_err(RouterError::Daemon)?;
         Ok(config)
@@ -478,7 +486,8 @@ impl Daemon {
             self.notify.clone(),
             self.config.delivery_poll,
         )
-        .with_notify_on_delivery(self.config.notify_on_delivery);
+        .with_notify_on_delivery(self.config.notify_on_delivery)
+        .with_rescue_auto_resolve(self.config.rescue_auto_resolve);
         let stop_file = self.config.state_dir.join(SHUTDOWN_FILE_NAME);
         worker.run(Some(&stop_file));
     }

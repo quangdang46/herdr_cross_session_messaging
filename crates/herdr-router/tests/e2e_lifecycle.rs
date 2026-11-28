@@ -118,6 +118,7 @@ fn test_config(state_dir: &std::path::Path, socket: &std::path::Path) -> DaemonC
         event_wakeup: Duration::from_millis(200),
         notify_on_delivery: false,
         bootstrap_enabled: true,
+        rescue_auto_resolve: true,
         runtime_kind: herdr_runtime::RuntimeKind::Herdr,
     }
 }

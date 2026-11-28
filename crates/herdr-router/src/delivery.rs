@@ -165,6 +165,16 @@ impl DeliveryWorker {
         self
     }
 
+    /// Set `[rescue] auto_resolve` — helpers may answer the source's
+    /// question/permission dialog, relaying peer-directed questions
+    /// through the pool. No-op when rescue is disabled (no herdr client).
+    pub fn with_rescue_auto_resolve(mut self, enabled: bool) -> Self {
+        if let Some(rescue) = &mut self.rescue {
+            rescue.set_auto_resolve(enabled);
+        }
+        self
+    }
+
     /// Run one nudge sweep (unanswered-mail reminders). Internally
     /// throttled to [`crate::nudge::NUDGE_SCAN_INTERVAL`]; called by
     /// [`Self::run`] every poll and exposed for tests.

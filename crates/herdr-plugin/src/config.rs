@@ -10,12 +10,18 @@
 //! [panel]
 //! autostart = true       # dock the inbox panel on new tabs/workspaces
 //! width = 36             # preferred panel width in terminal columns
+//!
+//! [rescue]
+//! auto_resolve = true    # helpers may answer blocked agents' question
+//!                        # dialogs, relaying peer-directed questions
+//!                        # through the pool
 //! ```
 //!
 //! `HERDR_POOL_*` environment variables override the file, one per setting:
 //! `HERDR_POOL_BOOTSTRAP`, `HERDR_POOL_PANEL_AUTOSTART`,
-//! `HERDR_POOL_PANEL_WIDTH`. A missing or malformed file falls back to
-//! defaults — configuration must never keep the pool from working.
+//! `HERDR_POOL_PANEL_WIDTH`, `HERDR_POOL_RESCUE_AUTO_RESOLVE`. A missing or
+//! malformed file falls back to defaults — configuration must never keep
+//! the pool from working.
 
 use std::path::Path;
 
@@ -42,6 +48,10 @@ pub struct PoolConfig {
     /// Preferred panel width in terminal columns. Default
     /// [`PANEL_WIDTH_DEFAULT`], clamped to `PANEL_WIDTH_MIN..=PANEL_WIDTH_MAX`.
     pub panel_width: u16,
+    /// Let rescue helpers resolve a blocked agent's question/permission
+    /// dialog — including relaying peer-directed questions through the
+    /// pool — instead of only unblocking benign prompts. Default `true`.
+    pub rescue_auto_resolve: bool,
 }
 
 impl Default for PoolConfig {
@@ -50,6 +60,7 @@ impl Default for PoolConfig {
             bootstrap_enabled: true,
             panel_autostart: false,
             panel_width: PANEL_WIDTH_DEFAULT,
+            rescue_auto_resolve: true,
         }
     }
 }
@@ -58,6 +69,7 @@ impl Default for PoolConfig {
 struct FileConfig {
     bootstrap: Option<BootstrapSection>,
     panel: Option<PanelSection>,
+    rescue: Option<RescueSection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +81,11 @@ struct BootstrapSection {
 struct PanelSection {
     autostart: Option<bool>,
     width: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RescueSection {
+    auto_resolve: Option<bool>,
 }
 
 impl PoolConfig {
@@ -102,6 +119,9 @@ impl PoolConfig {
                             config.panel_width = width.clamp(PANEL_WIDTH_MIN, PANEL_WIDTH_MAX);
                         }
                     }
+                    if let Some(auto_resolve) = file.rescue.and_then(|r| r.auto_resolve) {
+                        config.rescue_auto_resolve = auto_resolve;
+                    }
                 }
                 Err(_) => {
                     // Missing file is the normal case; a malformed one is
@@ -121,6 +141,9 @@ impl PoolConfig {
             .and_then(|v| v.to_string_lossy().trim().parse::<u16>().ok())
         {
             config.panel_width = width.clamp(PANEL_WIDTH_MIN, PANEL_WIDTH_MAX);
+        }
+        if let Some(v) = env_bool(env, "HERDR_POOL_RESCUE_AUTO_RESOLVE") {
+            config.rescue_auto_resolve = v;
         }
         config
     }
@@ -219,5 +242,24 @@ mod tests {
     fn unknown_bool_values_are_ignored() {
         let e = env(&[("HERDR_POOL_BOOTSTRAP", "maybe")]);
         assert!(PoolConfig::from_parts(None, &e).bootstrap_enabled);
+    }
+
+    #[test]
+    fn rescue_auto_resolve_file_and_env() {
+        // Default on.
+        assert!(PoolConfig::default().rescue_auto_resolve);
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[rescue]\nauto_resolve = false\n",
+        )
+        .unwrap();
+        let e = env(&[]);
+        assert!(!PoolConfig::from_parts(Some(dir.path()), &e).rescue_auto_resolve);
+
+        // Env overrides the file.
+        let e = env(&[("HERDR_POOL_RESCUE_AUTO_RESOLVE", "1")]);
+        assert!(PoolConfig::from_parts(Some(dir.path()), &e).rescue_auto_resolve);
     }
 }
