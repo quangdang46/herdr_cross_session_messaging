@@ -5,7 +5,7 @@ license: MIT OR Apache-2.0
 compatibility: Requires a managed agent runtime — Herdr (HERDR_ENV=1 inside a managed pane) or hc/herdr-core (HC_TERMINAL_ID inside a terminal) — and the herdr-pool CLI on PATH.
 metadata:
   author: herdr-cross-session-messaging
-  version: 0.2.1
+  version: 0.2.2
 ---
 
 # Herdr Cross-Session Messaging
